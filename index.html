@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>☘️ St. Patrick's Day Filter</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+</head>
+<body>
+
+  <div id="top-bar">
+    <span id="filter-label">☘️ St. Patrick's Day</span>
+  </div>
+
+  <div id="stage">
+    <video id="video" playsinline></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <div id="hint-pill">Open your mouth for luck ☘️</div>
+
+  <div id="bottom-bar">
+    <div class="side-slot"></div>
+    <button id="shutterBtn" aria-label="Take photo"></button>
+    <button id="flipBtn" aria-label="Flip camera">🔄</button>
+  </div>
+
+  <div id="flash"></div>
+
+  <script src="script.js"></script>
+</body>
+</html>
