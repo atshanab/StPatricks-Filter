@@ -11,11 +11,7 @@ body {
   -webkit-user-select: none;
 }
 
-#stage {
-  position: relative;
-  width: 100%;
-  height: 100%;
-}
+#stage { position: relative; width: 100%; height: 100%; }
 
 #video {
   position: absolute;
@@ -39,7 +35,7 @@ body {
   align-items: flex-end;
   justify-content: center;
   padding-bottom: 12px;
-  background: linear-gradient(to bottom, rgba(0,0,0,0.5) 0%, transparent 100%);
+  background: linear-gradient(to bottom, rgba(0,0,0,0.52) 0%, transparent 100%);
   pointer-events: none;
   z-index: 10;
 }
@@ -50,18 +46,25 @@ body {
   font-weight: 600;
   letter-spacing: 0.3px;
   text-shadow: 0 1px 6px rgba(0,0,0,0.6);
-  opacity: 0.9;
 }
 
 #bottom-bar {
   position: fixed;
   bottom: 0; left: 0; right: 0;
-  padding: 20px 40px 48px;
+  padding: 16px 40px 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  background: linear-gradient(to top, rgba(0,0,0,0.58) 0%, transparent 100%);
+  z-index: 10;
+}
+
+.controls-row {
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: linear-gradient(to top, rgba(0,0,0,0.55) 0%, transparent 100%);
-  z-index: 10;
 }
 
 #shutterBtn {
@@ -69,12 +72,9 @@ body {
   height: 76px;
   border-radius: 50%;
   background: transparent;
-  border: 4px solid rgba(255,255,255,0.9);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
+  border: 4px solid rgba(255,255,255,0.92);
   position: relative;
+  cursor: pointer;
   flex-shrink: 0;
   transition: transform 0.1s;
   -webkit-tap-highlight-color: transparent;
@@ -86,10 +86,12 @@ body {
   border-radius: 50%;
   background: rgba(255,255,255,0.92);
   position: absolute;
-  transition: transform 0.1s, opacity 0.1s;
+  top: 50%; left: 50%;
+  transform: translate(-50%,-50%);
+  transition: opacity 0.1s;
 }
-#shutterBtn:active { transform: scale(0.93); }
-#shutterBtn:active::after { opacity: 0.7; }
+#shutterBtn:active { transform: scale(0.92); }
+#shutterBtn:active::after { opacity: 0.65; }
 
 #flipBtn {
   width: 48px;
@@ -109,31 +111,18 @@ body {
   transition: background 0.15s, transform 0.3s;
   -webkit-tap-highlight-color: transparent;
 }
-#flipBtn:active { background: rgba(255,255,255,0.32); transform: rotate(180deg); }
+#flipBtn:active { background: rgba(255,255,255,0.3); transform: rotate(180deg); }
 
-.side-slot {
-  width: 48px;
-  height: 48px;
-  flex-shrink: 0;
-}
+.side-slot { width: 48px; height: 48px; flex-shrink: 0; }
 
-#hint-pill {
-  position: fixed;
-  bottom: 148px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(0,0,0,0.38);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border: 1px solid rgba(255,255,255,0.2);
-  color: rgba(255,255,255,0.88);
+#hint-text {
+  color: rgba(255,255,255,0.80);
   font-size: 13px;
   font-weight: 500;
-  padding: 7px 16px;
-  border-radius: 50px;
-  white-space: nowrap;
+  letter-spacing: 0.15px;
+  text-align: center;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.5);
   pointer-events: none;
-  z-index: 10;
 }
 
 #flash {
@@ -145,4 +134,4 @@ body {
   z-index: 20;
   transition: opacity 0.07s ease-out;
 }
-#flash.active { opacity: 0.8; }
+#flash.active { opacity: 0.82; }
