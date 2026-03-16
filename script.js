@@ -1,6 +1,6 @@
-// ☘️ St. Patrick's Day Filter v11
-// Smile detection → coins fall
-// PNG coin pile inside pot (no gradient fill, no dots)
+// ☘️ St. Patrick's Day Filter v12
+// Trigger: smile OR teeth showing
+// Pile: PNG coins drawn AFTER pot, clipped to pot opening
 
 const video      = document.getElementById('video');
 const canvas     = document.getElementById('canvas');
@@ -80,54 +80,60 @@ const smoothFW    = new Smoother(0.25);
 const smoothRoll  = new AngleSmoother(0.2);
 const smoothPitch = new Smoother(0.18);
 const smoothSmile = new Smoother(0.15);
+const smoothTeeth = new Smoother(0.15);
 
 // ─────────────────────────────────────────
-// Smile detection
-// Mouth corners: lm[61] left, lm[291] right
-// Mouth width vs face width — neutral ~0.38, smile > 0.47
-// Also check corner lift: corners rise relative to upper lip center lm[13]
+// Trigger detection: SMILE + TEETH
+// Smile  = mouth corner width / face width rises above personal baseline
+// Teeth  = inner lip gap (lm[13]→lm[14]) / face width exceeds threshold
+// Either condition OR both together triggers coins
 // ─────────────────────────────────────────
-let smileFrames  = 0;
-let isSmiling    = false;
-let dbgSmile     = 0;
+let triggered     = false;
+let triggerFrames = 0;
 
-// Collect baseline over first 45 frames
-let smileBaseline     = null;
-let smileSamples      = [];
-const SMILE_BASELINE_FRAMES = 45;
-const SMILE_THRESHOLD_ABOVE = 0.045; // how much above baseline ratio triggers smile
+// Smile baseline calibration
+let smileBaseline = null;
+let smileSamples  = [];
+const SMILE_CALIBRATION_FRAMES = 45;
+const SMILE_RISE_THRESHOLD     = 0.040;
 
-function updateSmile(lm) {
-  // Mouth corner distance
-  const [mx61,  my61 ] = [lm[61].x,  lm[61].y ];
-  const [mx291, my291] = [lm[291].x, lm[291].y];
-  const mouthW  = Math.hypot(mx291 - mx61, my291 - my61);
+// Teeth: mouth gap / face width
+const TEETH_THRESHOLD = 0.032;  // normalised — inner lips more than ~3% of face width apart
 
-  // Face width (cheek to cheek)
-  const faceW   = Math.abs(lm[454].x - lm[234].x);
+let dbgSmile = 0, dbgTeeth = 0;
 
-  const ratio   = faceW > 0.01 ? mouthW / faceW : 0.4;
-  const s       = smoothSmile.update(ratio);
-  dbgSmile      = s;
+function updateTrigger(lm) {
+  // ── Smile ratio ──────────────────────────────────────
+  const mouthW = Math.hypot(lm[291].x - lm[61].x, lm[291].y - lm[61].y);
+  const faceW  = Math.abs(lm[454].x - lm[234].x) || 0.01;
+  const sRatio = smoothSmile.update(mouthW / faceW);
+  dbgSmile = sRatio;
 
-  // Build baseline
+  // Calibrate baseline
   if (smileBaseline === null) {
-    smileSamples.push(s);
-    if (smileSamples.length >= SMILE_BASELINE_FRAMES) {
-      const sorted = [...smileSamples].sort((a, b) => a - b);
+    smileSamples.push(sRatio);
+    if (smileSamples.length >= SMILE_CALIBRATION_FRAMES) {
+      const sorted = [...smileSamples].sort((a,b) => a - b);
       smileBaseline = sorted[Math.floor(sorted.length / 2)];
     }
-    isSmiling = false; return;
+    triggered = false; return;
   }
 
-  // Drift baseline down slowly (only when not smiling, so it doesn't chase the smile)
-  const smiling = s > smileBaseline + SMILE_THRESHOLD_ABOVE;
-  if (!smiling) smileBaseline = smileBaseline * 0.992 + s * 0.008;
+  const isSmiling = sRatio > smileBaseline + SMILE_RISE_THRESHOLD;
+  if (!isSmiling) smileBaseline = smileBaseline * 0.992 + sRatio * 0.008;
 
-  smileFrames = smiling
-    ? Math.min(smileFrames + 1, 20)
-    : Math.max(smileFrames - 2, 0);
-  isSmiling = smileFrames >= 4;
+  // ── Teeth ratio: inner lip gap / face width ───────────
+  const lipGap = Math.abs(lm[14].y - lm[13].y);  // normalised
+  const tRatio = smoothTeeth.update(lipGap / faceW);
+  dbgTeeth = tRatio;
+  const isTeeth = tRatio > TEETH_THRESHOLD;
+
+  // Trigger on either smile OR teeth showing
+  const active = isSmiling || isTeeth;
+  triggerFrames = active
+    ? Math.min(triggerFrames + 1, 20)
+    : Math.max(triggerFrames - 2, 0);
+  triggered = triggerFrames >= 4;
 }
 
 // ─────────────────────────────────────────
@@ -142,17 +148,15 @@ function getPot() {
 }
 
 // ─────────────────────────────────────────
-// Pile — column height map (for physics)
-//        + settled PNG list (for rendering)
+// Pile — column height map for collision
+//        + settled PNG list for rendering
 // ─────────────────────────────────────────
 const NUM_COLS   = 90;
-let   colHeight  = [];   // pixels stacked per column above rimY
-let   settledPNGs = [];  // {x, y, size, img, rot} — drawn as PNGs each frame
-
-const COIN_SIZE_PX = () => Math.round(18 * window.devicePixelRatio);
+let   colHeight  = [];    // px stacked above rimY per column
+let   settledPNGs = [];   // {x, y, size, img, rot}
 
 function initPile() {
-  colHeight  = new Array(NUM_COLS).fill(0);
+  colHeight   = new Array(NUM_COLS).fill(0);
   settledPNGs = [];
 }
 
@@ -161,6 +165,7 @@ function colIndex(x) {
     Math.floor(x / canvas.width * NUM_COLS)));
 }
 
+// Current pile surface Y at canvas-x coordinate
 function surfaceYAt(x) {
   const { rimY } = getPot();
   return rimY - colHeight[colIndex(x)];
@@ -168,43 +173,55 @@ function surfaceYAt(x) {
 
 function addToPile(coin) {
   const { cx, rimY, rimRX } = getPot();
-  const colW   = canvas.width / NUM_COLS;
-  const coinSz = coin.size;
+  const colW = canvas.width / NUM_COLS;
 
-  // Random jitter so coins land organically
-  const jitter = (Math.random() - 0.5) * coinSz * 0.9;
-  const landX  = Math.max(cx - rimRX * 0.85,
-                   Math.min(cx + rimRX * 0.85, coin.x + jitter));
+  // Organic landing jitter
+  const jitter = (Math.random() - 0.5) * coin.size * 0.85;
+  const landX  = Math.max(cx - rimRX * 0.84,
+                   Math.min(cx + rimRX * 0.84, coin.x + jitter));
 
-  // Only accept coins inside the pot opening
+  // Discard coins outside the pot
   if (Math.abs(landX - cx) > rimRX * 0.88) return;
 
-  const c0 = Math.max(0, Math.floor((landX - coinSz * 0.5) / colW));
-  const c1 = Math.min(NUM_COLS - 1, Math.floor((landX + coinSz * 0.5) / colW));
+  const c0 = Math.max(0, Math.floor((landX - coin.size * 0.5) / colW));
+  const c1 = Math.min(NUM_COLS - 1, Math.floor((landX + coin.size * 0.5) / colW));
 
-  // Find current surface at landing spot
-  let surface = 0;
-  for (let c = c0; c <= c1; c++) surface = Math.max(surface, colHeight[c]);
+  // Current surface height for landing columns
+  let maxH = 0;
+  for (let c = c0; c <= c1; c++) maxH = Math.max(maxH, colHeight[c]);
 
-  const settledY = rimY - surface - coinSz * 0.40;
+  // Cap pile at 82% of screen above rimY
+  if (maxH + coin.size * 0.55 > rimY * 0.82) return;
 
-  // Cap: pile can't rise above 82% of screen height above rimY
-  if (surface + coinSz * 0.55 > rimY * 0.82) return;
-
-  // Raise columns
-  const raise = coinSz * 0.52;
+  const raise = coin.size * 0.52;
   for (let c = c0; c <= c1; c++) colHeight[c] += raise;
 
-  // Store PNG entry with a gentle random tilt
-  const rot = (Math.random() - 0.5) * 0.55;
-  settledPNGs.push({ x: landX, y: settledY, size: coinSz, img: coin.img, rot });
+  // Store for PNG rendering
+  // Y = surface at time of landing, positioned so coin sits on top of pile
+  const settledY = rimY - maxH - coin.size * 0.42;
+  const rot      = (Math.random() - 0.5) * 0.55;
+  settledPNGs.push({ x: landX, y: settledY, size: coin.size, img: coin.img, rot });
 
-  // Performance cap
-  if (settledPNGs.length > 320) settledPNGs.splice(0, settledPNGs.length - 320);
+  if (settledPNGs.length > 350) settledPNGs.splice(0, settledPNGs.length - 350);
 }
 
-// Draw the settled PNG pile — oldest (bottom) first, newest (top) last
+// Draw PNG pile clipped to pot opening, drawn AFTER the pot so it appears inside/on top
 function drawSettledPile() {
+  if (settledPNGs.length === 0) return;
+
+  const { cx, rimY, rimRX, rimRY } = getPot();
+
+  ctx.save();
+
+  // Clip: only show coins within the pot opening ellipse AND above rimY
+  // We use an inverted approach: clip to a wide rect above rimY,
+  // also horizontally bounded by rimRX
+  ctx.beginPath();
+  // Tall clip rect: full width, from top of screen down to rimY
+  ctx.rect(cx - rimRX * 0.92, 0, rimRX * 1.84, rimY + rimRY * 0.5);
+  ctx.clip();
+
+  // Draw every settled PNG, back-to-front (oldest first = bottom of pile)
   for (const s of settledPNGs) {
     ctx.save();
     ctx.translate(s.x, s.y);
@@ -212,6 +229,8 @@ function drawSettledPile() {
     ctx.drawImage(s.img, -s.size / 2, -s.size / 2, s.size, s.size);
     ctx.restore();
   }
+
+  ctx.restore();
 }
 
 // ─────────────────────────────────────────
@@ -224,10 +243,10 @@ function drawPot() {
 
   ctx.save();
 
-  // Body clipped below rimY
+  // Body — clipped to below rimY so it never covers the face
   ctx.save();
   ctx.beginPath();
-  ctx.rect(0, rimY - 2, canvas.width, canvas.height - rimY + 4);
+  ctx.rect(0, rimY - 2, canvas.width, canvas.height);
   ctx.clip();
   ctx.beginPath();
   ctx.arc(cx, bodyCY, bodyR, 0, Math.PI * 2);
@@ -240,7 +259,6 @@ function drawPot() {
   bg.addColorStop(0.7, '#131313');
   bg.addColorStop(1,   '#050505');
   ctx.fillStyle = bg; ctx.fill();
-  // Highlight streak
   ctx.beginPath();
   ctx.ellipse(cx - bodyR*0.26, bodyCY - bodyR*0.12, bodyR*0.11, bodyR*0.34, -0.22, 0, Math.PI*2);
   ctx.fillStyle = 'rgba(120,120,120,0.16)'; ctx.fill();
@@ -262,7 +280,7 @@ function drawPot() {
   rg.addColorStop(1,    '#7a4e04');
   ctx.fillStyle = rg; ctx.fill();
 
-  // Inner shadow
+  // Inner shadow (opening depth)
   ctx.beginPath();
   ctx.ellipse(cx, rimY + rimRY*0.28, rimRX*0.82, rimRY*0.52, 0, 0, Math.PI*2);
   ctx.fillStyle = 'rgba(0,0,0,0.60)'; ctx.fill();
@@ -284,7 +302,6 @@ function spawnFromSky() {
   const now = performance.now();
   if (now - lastSpawnMs < 75) return;
   lastSpawnMs = now;
-
   for (let i = 0; i < 3; i++) {
     const isCoin = Math.random() < 0.72;
     const base   = isCoin ? (13 + Math.random() * 11) : (10 + Math.random() * 9);
@@ -308,19 +325,15 @@ function stepFalling() {
   for (let i = 0; i < falling.length; i++) {
     const p = falling[i];
     p.vy += p.ay; p.x += p.vx; p.y += p.vy; p.rot += p.spin;
-
-    // Bounce off screen edges
     if (p.x - p.size*0.5 < 0)            { p.x = p.size*0.5;              p.vx =  Math.abs(p.vx)*0.6; }
     if (p.x + p.size*0.5 > canvas.width) { p.x = canvas.width-p.size*0.5; p.vx = -Math.abs(p.vx)*0.6; }
 
-    // Settle when hitting current pile surface
     const surf = surfaceYAt(p.x);
-    if (p.y + p.size * 0.5 >= surf) {
+    if (p.y + p.size*0.5 >= surf) {
       addToPile(p);
       toRemove.push(i);
       continue;
     }
-
     ctx.save();
     ctx.translate(p.x, p.y); ctx.rotate(p.rot);
     ctx.drawImage(p.img, -p.size/2, -p.size/2, p.size, p.size);
@@ -367,7 +380,7 @@ function drawRainbow(cx, cy, radius) {
     ctx.beginPath();
     ctx.arc(cx, cy, radius + i*bw, Math.PI, 2*Math.PI);
     ctx.strokeStyle = `rgba(${r},${g},${b},${rainbowAlpha})`;
-    ctx.lineWidth = bw * 1.15; ctx.stroke();
+    ctx.lineWidth = bw*1.15; ctx.stroke();
   }
 }
 
@@ -398,8 +411,10 @@ function drawFaceGrading(lm) {
 // Cheek shamrocks
 // ─────────────────────────────────────────
 function drawCheekStickers(lm) {
-  const [x234]=lmToCanvas(lm[234]), [,y234]=lmToCanvas(lm[234]);
-  const [x454]=lmToCanvas(lm[454]), [,y454]=lmToCanvas(lm[454]);
+  const [x234]=lmToCanvas(lm[234]);
+  const [,y234]=lmToCanvas(lm[234]);
+  const [x454]=lmToCanvas(lm[454]);
+  const [,y454]=lmToCanvas(lm[454]);
   const faceW=Math.hypot(x454-x234,y454-y234), size=faceW*0.13;
   for (const idx of [50,280]) {
     const [cx,cy]=lmToCanvas(lm[idx]);
@@ -428,7 +443,7 @@ function drawHat(lm) {
   const faceUpLen=Math.hypot(x10-x152,y10-y152)||1;
   const uX=(x10-x152)/faceUpLen, uY=(y10-y152)/faceUpLen;
   const sx=smoothHatX.update(x10), sy=smoothHatY.update(y10);
-  const sw=smoothFW.update(faceW),  sa=smoothRoll.update(rollAngle);
+  const sw=smoothFW.update(faceW), sa=smoothRoll.update(rollAngle);
   const sp=smoothPitch.update(pitchScale);
   const hatW=sw*1.25, hatH=hatW*(900/800)*sp;
   const anchorY=hatH*BRIM_BOTTOM_FRAC;
@@ -448,18 +463,21 @@ function drawHat(lm) {
 // Debug overlay
 // ─────────────────────────────────────────
 function drawDebug() {
-  const warmup = smileSamples.length < SMILE_BASELINE_FRAMES && smileBaseline === null;
-  const baseline = smileBaseline !== null ? smileBaseline.toFixed(3) : '…';
-  const status = warmup
-    ? `calibrating ${smileSamples.length}/${SMILE_BASELINE_FRAMES}`
-    : isSmiling ? '😄 SMILING' : '😐 neutral';
+  const warming = smileBaseline === null;
+  const base    = smileBaseline ? smileBaseline.toFixed(3) : '…';
+  const status  = warming
+    ? `calibrating ${smileSamples.length}/${SMILE_CALIBRATION_FRAMES}`
+    : triggered ? '😄 TRIGGERED' : '😐 neutral';
   const dpr = window.devicePixelRatio;
   ctx.save();
   ctx.font=`bold ${13*dpr}px -apple-system,sans-serif`;
   ctx.fillStyle='rgba(0,0,0,0.55)';
-  ctx.fillRect(8,8,280*dpr,30*dpr);
-  ctx.fillStyle=isSmiling?'#00ff88':'#fff';
-  ctx.fillText(`smile: ${dbgSmile.toFixed(3)} base:${baseline}  ${status}`, 14, 26*dpr);
+  ctx.fillRect(8,8,310*dpr,30*dpr);
+  ctx.fillStyle=triggered?'#00ff88':'#fff';
+  ctx.fillText(
+    `smile:${dbgSmile.toFixed(3)} base:${base} teeth:${dbgTeeth.toFixed(3)}  ${status}`,
+    14, 26*dpr
+  );
   ctx.restore();
 }
 
@@ -481,11 +499,11 @@ function onResults(results) {
   if (ambient.length===0) initAmbient();
   stepAmbient();
 
-  // 3. PNG coin pile (behind pot rim)
-  drawSettledPile();
-
-  // 4. Pot (rim sits on top of pile)
+  // 3. Pot body + rim (drawn first — pile goes on top)
   drawPot();
+
+  // 4. PNG coin pile — drawn AFTER pot, clipped to pot opening
+  drawSettledPile();
 
   let hatAnchor = null;
 
@@ -495,19 +513,19 @@ function onResults(results) {
     drawFaceGrading(lm);
     hatAnchor = drawHat(lm);
     drawCheekStickers(lm);
-    updateSmile(lm);
+    updateTrigger(lm);
   } else {
-    smileFrames = Math.max(smileFrames - 1, 0);
-    isSmiling   = smileFrames >= 4;
+    triggerFrames = Math.max(triggerFrames - 1, 0);
+    triggered     = triggerFrames >= 4;
   }
 
-  // 6. Rainbow (shows when smiling)
-  rainbowTarget = isSmiling ? 0.60 : 0;
+  // 6. Rainbow (shows when triggered)
+  rainbowTarget = triggered ? 0.60 : 0;
   rainbowAlpha += (rainbowTarget - rainbowAlpha) * 0.08;
   if (hatAnchor) drawRainbow(hatAnchor.rcx, hatAnchor.rcy, hatAnchor.faceW * 1.1);
 
-  // 7. Coins fall while smiling
-  if (isSmiling) spawnFromSky();
+  // 7. Coins fall while triggered
+  if (triggered) spawnFromSky();
   stepFalling();
 
   // 8. Debug
@@ -541,8 +559,8 @@ async function start() {
 flipBtn.addEventListener('click', () => {
   currentFacingMode = currentFacingMode==='user'?'environment':'user';
   smoothHatX.reset(); smoothHatY.reset(); smoothFW.reset();
-  smoothRoll.reset(); smoothPitch.reset(); smoothSmile.reset();
-  smileFrames=0; isSmiling=false;
+  smoothRoll.reset(); smoothPitch.reset(); smoothSmile.reset(); smoothTeeth.reset();
+  triggerFrames=0; triggered=false;
   smileSamples=[]; smileBaseline=null;
   start();
 });
