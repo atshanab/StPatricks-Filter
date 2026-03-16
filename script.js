@@ -107,7 +107,7 @@ function updateLookUp(lm) {
   const ratio        = faceWidth > 0.01 ? noseChinDist / faceWidth : 1;
   debugRatio         = ratio;
 
-  const lookingUp    = ratio < 0.46;  // below this = head tilted back
+  const lookingUp    = ratio > 0.37;  // up=0.4 is highest, straight~0.3, down=0.2  // below this = head tilted back
   lookUpFrames = lookingUp
     ? Math.min(lookUpFrames + 1, 16)
     : Math.max(lookUpFrames - 2, 0);
