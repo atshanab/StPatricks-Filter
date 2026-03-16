@@ -241,7 +241,7 @@ function drawPot() {
     const txtW = rimRX * 1.60;
     const txtH = txtW * (potTextImg.naturalHeight / potTextImg.naturalWidth);
     const txtX = cx - txtW / 2;
-    const txtY = rimY + rimRY * 0.8;       // just below rim
+    const txtY = rimY + rimRY * 0.8 + canvas.height * 0.12;  // lower on pot body
     ctx.save();
     // Clip to body so text doesn't spill outside cauldron
     ctx.beginPath(); ctx.rect(0, rimY, canvas.width, canvas.height); ctx.clip();
