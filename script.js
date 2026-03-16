@@ -1,6 +1,6 @@
-// ☘️ St. Patrick's Day Filter v10
-// Eye gaze (iris landmarks) → look-up detection
-// Cartoon gold coin heap overflowing the pot
+// ☘️ St. Patrick's Day Filter v11
+// Smile detection → coins fall
+// PNG coin pile inside pot (no gradient fill, no dots)
 
 const video      = document.getElementById('video');
 const canvas     = document.getElementById('canvas');
@@ -79,49 +79,55 @@ const smoothHatY  = new Smoother(0.28);
 const smoothFW    = new Smoother(0.25);
 const smoothRoll  = new AngleSmoother(0.2);
 const smoothPitch = new Smoother(0.18);
-const smoothGaze  = new Smoother(0.20);  // smoothed gaze ratio
+const smoothSmile = new Smoother(0.15);
 
 // ─────────────────────────────────────────
-// Eye-gaze look-up detection
-// Uses MediaPipe refined iris landmarks (requires refineLandmarks: true)
-//
-// Left eye:  iris center = lm[468]
-//            upper lid   = lm[159]   lower lid = lm[145]
-// Right eye: iris center = lm[473]
-//            upper lid   = lm[386]   lower lid = lm[374]
-//
-// gazeRatio = (iris_y - upper_y) / (lower_y - upper_y)
-//   ~0.5 = straight  |  <0.35 = looking up  |  >0.65 = looking down
+// Smile detection
+// Mouth corners: lm[61] left, lm[291] right
+// Mouth width vs face width — neutral ~0.38, smile > 0.47
+// Also check corner lift: corners rise relative to upper lip center lm[13]
 // ─────────────────────────────────────────
-let gazeFrames  = 0;
-let isLookingUp = false;
-let dbgGaze     = 0;
+let smileFrames  = 0;
+let isSmiling    = false;
+let dbgSmile     = 0;
 
-const GAZE_UP_THRESHOLD = 0.32;  // iris near top lid → looking up
-const GAZE_FRAMES_ON  = 5;
-const GAZE_FRAMES_OFF = 3;
+// Collect baseline over first 45 frames
+let smileBaseline     = null;
+let smileSamples      = [];
+const SMILE_BASELINE_FRAMES = 45;
+const SMILE_THRESHOLD_ABOVE = 0.045; // how much above baseline ratio triggers smile
 
-function updateGaze(lm) {
-  // Need refined landmarks (index 468+); bail if not present
-  if (!lm[468] || !lm[473]) { isLookingUp = false; return; }
+function updateSmile(lm) {
+  // Mouth corner distance
+  const [mx61,  my61 ] = [lm[61].x,  lm[61].y ];
+  const [mx291, my291] = [lm[291].x, lm[291].y];
+  const mouthW  = Math.hypot(mx291 - mx61, my291 - my61);
 
-  // Left eye ratio
-  const lyU = lm[159].y, lyL = lm[145].y, lyI = lm[468].y;
-  const leftRatio  = (lyL - lyU) > 0.001 ? (lyI - lyU) / (lyL - lyU) : 0.5;
+  // Face width (cheek to cheek)
+  const faceW   = Math.abs(lm[454].x - lm[234].x);
 
-  // Right eye ratio
-  const ryU = lm[386].y, ryL = lm[374].y, ryI = lm[473].y;
-  const rightRatio = (ryL - ryU) > 0.001 ? (ryI - ryU) / (ryL - ryU) : 0.5;
+  const ratio   = faceW > 0.01 ? mouthW / faceW : 0.4;
+  const s       = smoothSmile.update(ratio);
+  dbgSmile      = s;
 
-  const avg = (leftRatio + rightRatio) / 2;
-  const s   = smoothGaze.update(avg);
-  dbgGaze   = s;
+  // Build baseline
+  if (smileBaseline === null) {
+    smileSamples.push(s);
+    if (smileSamples.length >= SMILE_BASELINE_FRAMES) {
+      const sorted = [...smileSamples].sort((a, b) => a - b);
+      smileBaseline = sorted[Math.floor(sorted.length / 2)];
+    }
+    isSmiling = false; return;
+  }
 
-  const lookingUp = s < GAZE_UP_THRESHOLD;
-  gazeFrames = lookingUp
-    ? Math.min(gazeFrames + 1, 20)
-    : Math.max(gazeFrames - GAZE_FRAMES_OFF, 0);
-  isLookingUp = gazeFrames >= GAZE_FRAMES_ON;
+  // Drift baseline down slowly (only when not smiling, so it doesn't chase the smile)
+  const smiling = s > smileBaseline + SMILE_THRESHOLD_ABOVE;
+  if (!smiling) smileBaseline = smileBaseline * 0.992 + s * 0.008;
+
+  smileFrames = smiling
+    ? Math.min(smileFrames + 1, 20)
+    : Math.max(smileFrames - 2, 0);
+  isSmiling = smileFrames >= 4;
 }
 
 // ─────────────────────────────────────────
@@ -136,15 +142,23 @@ function getPot() {
 }
 
 // ─────────────────────────────────────────
-// Pile — height map; coins pile UP from rimY
+// Pile — column height map (for physics)
+//        + settled PNG list (for rendering)
 // ─────────────────────────────────────────
-const NUM_COLS  = 80;
-let   colHeight = [];   // pixels stacked above rimY per column
+const NUM_COLS   = 90;
+let   colHeight  = [];   // pixels stacked per column above rimY
+let   settledPNGs = [];  // {x, y, size, img, rot} — drawn as PNGs each frame
 
-function initPile() { colHeight = new Array(NUM_COLS).fill(0); }
+const COIN_SIZE_PX = () => Math.round(18 * window.devicePixelRatio);
+
+function initPile() {
+  colHeight  = new Array(NUM_COLS).fill(0);
+  settledPNGs = [];
+}
 
 function colIndex(x) {
-  return Math.max(0, Math.min(NUM_COLS - 1, Math.floor(x / canvas.width * NUM_COLS)));
+  return Math.max(0, Math.min(NUM_COLS - 1,
+    Math.floor(x / canvas.width * NUM_COLS)));
 }
 
 function surfaceYAt(x) {
@@ -152,145 +166,56 @@ function surfaceYAt(x) {
   return rimY - colHeight[colIndex(x)];
 }
 
-function addToPile(x, size) {
+function addToPile(coin) {
   const { cx, rimY, rimRX } = getPot();
-  const colW = canvas.width / NUM_COLS;
+  const colW   = canvas.width / NUM_COLS;
+  const coinSz = coin.size;
 
-  // Jitter landing X so pile is organic
-  const jitter = (Math.random() - 0.5) * size * 0.8;
-  const landX  = Math.max(cx - rimRX * 0.88,
-                   Math.min(cx + rimRX * 0.88, x + jitter));
+  // Random jitter so coins land organically
+  const jitter = (Math.random() - 0.5) * coinSz * 0.9;
+  const landX  = Math.max(cx - rimRX * 0.85,
+                   Math.min(cx + rimRX * 0.85, coin.x + jitter));
 
-  // Only settle inside the pot
-  if (Math.abs(landX - cx) > rimRX * 0.90) return;
+  // Only accept coins inside the pot opening
+  if (Math.abs(landX - cx) > rimRX * 0.88) return;
 
-  const c0 = Math.max(0, Math.floor((landX - size * 0.5) / colW));
-  const c1 = Math.min(NUM_COLS - 1, Math.floor((landX + size * 0.5) / colW));
-  const add = size * 0.60;   // how much each coin adds to the column height
+  const c0 = Math.max(0, Math.floor((landX - coinSz * 0.5) / colW));
+  const c1 = Math.min(NUM_COLS - 1, Math.floor((landX + coinSz * 0.5) / colW));
 
-  for (let c = c0; c <= c1; c++) {
-    colHeight[c] += add;
-    // Hard cap — pile never exceeds 80% of screen height above rim
-    colHeight[c] = Math.min(colHeight[c], rimY * 0.80);
+  // Find current surface at landing spot
+  let surface = 0;
+  for (let c = c0; c <= c1; c++) surface = Math.max(surface, colHeight[c]);
+
+  const settledY = rimY - surface - coinSz * 0.40;
+
+  // Cap: pile can't rise above 82% of screen height above rimY
+  if (surface + coinSz * 0.55 > rimY * 0.82) return;
+
+  // Raise columns
+  const raise = coinSz * 0.52;
+  for (let c = c0; c <= c1; c++) colHeight[c] += raise;
+
+  // Store PNG entry with a gentle random tilt
+  const rot = (Math.random() - 0.5) * 0.55;
+  settledPNGs.push({ x: landX, y: settledY, size: coinSz, img: coin.img, rot });
+
+  // Performance cap
+  if (settledPNGs.length > 320) settledPNGs.splice(0, settledPNGs.length - 320);
+}
+
+// Draw the settled PNG pile — oldest (bottom) first, newest (top) last
+function drawSettledPile() {
+  for (const s of settledPNGs) {
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    ctx.rotate(s.rot);
+    ctx.drawImage(s.img, -s.size / 2, -s.size / 2, s.size, s.size);
+    ctx.restore();
   }
 }
 
 // ─────────────────────────────────────────
-// Cartoon gold heap drawing
-// ─────────────────────────────────────────
-function drawPile() {
-  const { cx, rimY, rimRX, rimRY } = getPot();
-  const colW = canvas.width / NUM_COLS;
-
-  // Collect visible columns (inside pot width)
-  const cols = [];
-  for (let c = 0; c < NUM_COLS; c++) {
-    const colCX = (c + 0.5) * colW;
-    if (Math.abs(colCX - cx) > rimRX * 0.92) continue;
-    if (colHeight[c] < 1) continue;
-    cols.push({ c, x: colCX, h: colHeight[c], y: rimY - colHeight[c] });
-  }
-  if (cols.length === 0) return;
-
-  // Smooth the surface profile
-  const smoothed = cols.map((col, i) => {
-    const prev = cols[Math.max(0, i-1)].y;
-    const next = cols[Math.min(cols.length-1, i+1)].y;
-    return { ...col, sy: (prev + col.y * 2 + next) / 4 };
-  });
-
-  ctx.save();
-
-  // ── 1. Gold bulk fill polygon ────────────────────────────────
-  ctx.beginPath();
-  ctx.moveTo(smoothed[0].x - colW, rimY);
-  for (const { x, sy } of smoothed) ctx.lineTo(x, sy);
-  ctx.lineTo(smoothed[smoothed.length-1].x + colW, rimY);
-  ctx.closePath();
-
-  const topY = Math.min(...smoothed.map(s => s.sy));
-  const gf   = ctx.createLinearGradient(0, topY, 0, rimY);
-  gf.addColorStop(0,    '#FFE033');
-  gf.addColorStop(0.25, '#FFD700');
-  gf.addColorStop(0.60, '#C8900E');
-  gf.addColorStop(1,    '#8B5E00');
-  ctx.fillStyle = gf;
-  ctx.fill();
-
-  // ── 2. Coin circles — top layer ──────────────────────────────
-  // Draw overlapping circles across the entire surface for a cartoon heap
-  const coinR = colW * 1.25;
-
-  // Build surface points including some randomness for organic look
-  for (let i = 0; i < smoothed.length; i++) {
-    const { x: sx, sy } = smoothed[i];
-    const isHighPoint = sy <= (smoothed[Math.max(0,i-1)].sy + 2) &&
-                        sy <= (smoothed[Math.min(smoothed.length-1,i+1)].sy + 2);
-
-    // Draw every column's top coin (the surface)
-    drawCoinCircle(sx, sy, coinR, isHighPoint);
-
-    // If pile is deep, draw a second layer below
-    if (colHeight[smoothed[i].c] > coinR * 2.8) {
-      const ly = sy + coinR * 1.55 + (Math.random() - 0.5) * coinR * 0.3;
-      if (ly < rimY - 4) drawCoinCircle(sx, ly, coinR * 0.88, false);
-    }
-    // And a third layer for very deep piles
-    if (colHeight[smoothed[i].c] > coinR * 5) {
-      const ly2 = sy + coinR * 3.1 + (Math.random() - 0.5) * coinR * 0.3;
-      if (ly2 < rimY - 4) drawCoinCircle(sx, ly2, coinR * 0.78, false);
-    }
-  }
-
-  // ── 3. Shamrock accent coins (every 5th column at surface) ───
-  for (let i = 2; i < smoothed.length; i += 5) {
-    const { x: sx, sy } = smoothed[i];
-    if (shamrockImg.complete) {
-      ctx.save();
-      ctx.globalAlpha = 0.28;
-      ctx.drawImage(shamrockImg, sx - coinR*0.75, sy - coinR*0.75, coinR*1.5, coinR*1.5);
-      ctx.restore();
-    }
-  }
-
-  ctx.restore();
-}
-
-function drawCoinCircle(x, y, r, isTop) {
-  // Coin face
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  const cg = ctx.createRadialGradient(
-    x - r*0.30, y - r*0.30, r*0.04,
-    x, y, r
-  );
-  if (isTop) {
-    cg.addColorStop(0,   '#FFEC6E');
-    cg.addColorStop(0.45,'#FFD700');
-    cg.addColorStop(0.80,'#C89010');
-    cg.addColorStop(1,   '#8B6000');
-  } else {
-    cg.addColorStop(0,   '#F0C840');
-    cg.addColorStop(0.50,'#C89010');
-    cg.addColorStop(1,   '#7A4E00');
-  }
-  ctx.fillStyle = cg;
-  ctx.fill();
-
-  // Coin rim
-  ctx.strokeStyle = 'rgba(120,72,0,0.50)';
-  ctx.lineWidth   = 1.8;
-  ctx.stroke();
-
-  // Specular shine
-  ctx.beginPath();
-  ctx.arc(x - r*0.30, y - r*0.30, r*0.30, 0, Math.PI*2);
-  ctx.fillStyle = isTop ? 'rgba(255,255,210,0.58)' : 'rgba(255,255,180,0.28)';
-  ctx.fill();
-}
-
-// ─────────────────────────────────────────
-// Pot of gold (drawn OVER pile base)
+// Pot of gold
 // ─────────────────────────────────────────
 function drawPot() {
   const { cx, rimY, rimRX, rimRY } = getPot();
@@ -315,6 +240,7 @@ function drawPot() {
   bg.addColorStop(0.7, '#131313');
   bg.addColorStop(1,   '#050505');
   ctx.fillStyle = bg; ctx.fill();
+  // Highlight streak
   ctx.beginPath();
   ctx.ellipse(cx - bodyR*0.26, bodyCY - bodyR*0.12, bodyR*0.11, bodyR*0.34, -0.22, 0, Math.PI*2);
   ctx.fillStyle = 'rgba(120,120,120,0.16)'; ctx.fill();
@@ -356,17 +282,18 @@ let falling = [], lastSpawnMs = 0;
 
 function spawnFromSky() {
   const now = performance.now();
-  if (now - lastSpawnMs < 80) return;
+  if (now - lastSpawnMs < 75) return;
   lastSpawnMs = now;
+
   for (let i = 0; i < 3; i++) {
     const isCoin = Math.random() < 0.72;
-    const base   = isCoin ? (12 + Math.random() * 12) : (9 + Math.random() * 9);
+    const base   = isCoin ? (13 + Math.random() * 11) : (10 + Math.random() * 9);
     const size   = base * window.devicePixelRatio;
     falling.push({
-      x:    canvas.width * (0.05 + Math.random() * 0.90),
+      x:    canvas.width * (0.06 + Math.random() * 0.88),
       y:    -size,
       vx:   (Math.random() - 0.5) * 3.5,
-      vy:   1.4 + Math.random() * 2.0,
+      vy:   1.5 + Math.random() * 2.0,
       ay:   0.25 + Math.random() * 0.10,
       rot:  Math.random() * Math.PI * 2,
       spin: (Math.random() - 0.5) * 0.12,
@@ -382,14 +309,14 @@ function stepFalling() {
     const p = falling[i];
     p.vy += p.ay; p.x += p.vx; p.y += p.vy; p.rot += p.spin;
 
-    // Wall bounce
+    // Bounce off screen edges
     if (p.x - p.size*0.5 < 0)            { p.x = p.size*0.5;              p.vx =  Math.abs(p.vx)*0.6; }
     if (p.x + p.size*0.5 > canvas.width) { p.x = canvas.width-p.size*0.5; p.vx = -Math.abs(p.vx)*0.6; }
 
-    // Land on current pile surface
+    // Settle when hitting current pile surface
     const surf = surfaceYAt(p.x);
-    if (p.y + p.size*0.5 >= surf) {
-      addToPile(p.x, p.size);
+    if (p.y + p.size * 0.5 >= surf) {
+      addToPile(p);
       toRemove.push(i);
       continue;
     }
@@ -440,7 +367,7 @@ function drawRainbow(cx, cy, radius) {
     ctx.beginPath();
     ctx.arc(cx, cy, radius + i*bw, Math.PI, 2*Math.PI);
     ctx.strokeStyle = `rgba(${r},${g},${b},${rainbowAlpha})`;
-    ctx.lineWidth = bw*1.15; ctx.stroke();
+    ctx.lineWidth = bw * 1.15; ctx.stroke();
   }
 }
 
@@ -453,8 +380,7 @@ function drawFaceGrading(lm) {
   const [x10, y10 ] = lmToCanvas(lm[10]);
   const [x152,y152] = lmToCanvas(lm[152]);
   const fcx=(x234+x454)/2, fcy=(y10+y152)/2;
-  const faceW=Math.hypot(x454-x234,y454-y234);
-  const faceH=Math.abs(y152-y10)*1.05;
+  const faceW=Math.hypot(x454-x234,y454-y234), faceH=Math.abs(y152-y10)*1.05;
   ctx.save();
   ctx.beginPath();
   ctx.ellipse(fcx,fcy,faceW*0.52,faceH*0.52,0,0,Math.PI*2);
@@ -474,8 +400,7 @@ function drawFaceGrading(lm) {
 function drawCheekStickers(lm) {
   const [x234]=lmToCanvas(lm[234]), [,y234]=lmToCanvas(lm[234]);
   const [x454]=lmToCanvas(lm[454]), [,y454]=lmToCanvas(lm[454]);
-  const faceW=Math.hypot(x454-x234,y454-y234);
-  const size=faceW*0.13;
+  const faceW=Math.hypot(x454-x234,y454-y234), size=faceW*0.13;
   for (const idx of [50,280]) {
     const [cx,cy]=lmToCanvas(lm[idx]);
     ctx.save(); ctx.globalAlpha=0.75;
@@ -491,38 +416,31 @@ const BRIM_BOTTOM_FRAC = 855/900;
 const CROWN_TOP_FRAC   =  80/900;
 
 function drawHat(lm) {
-  const [x10, y10 ] = lmToCanvas(lm[10]);
-  const [x152,y152] = lmToCanvas(lm[152]);
-  const [x234,y234] = lmToCanvas(lm[234]);
-  const [x454,y454] = lmToCanvas(lm[454]);
-  const [xL,yL,xR,yR] = x234<=x454?[x234,y234,x454,y454]:[x454,y454,x234,y234];
-  const rollAngle = Math.atan2(yR-yL, xR-xL);
-  const faceW     = Math.hypot(xR-xL, yR-yL);
-  const faceH     = Math.abs(y152-y10);
-  const pitchRaw  = faceH / (faceW||1);
-  const pitchScale= Math.max(0.45, Math.min(1.0, pitchRaw*0.70));
-
-  // Face-up axis
-  const faceUpLen = Math.hypot(x10-x152, y10-y152)||1;
+  const [x10, y10 ]=lmToCanvas(lm[10]);
+  const [x152,y152]=lmToCanvas(lm[152]);
+  const [x234,y234]=lmToCanvas(lm[234]);
+  const [x454,y454]=lmToCanvas(lm[454]);
+  const [xL,yL,xR,yR]=x234<=x454?[x234,y234,x454,y454]:[x454,y454,x234,y234];
+  const rollAngle=Math.atan2(yR-yL,xR-xL);
+  const faceW=Math.hypot(xR-xL,yR-yL);
+  const faceH=Math.abs(y152-y10);
+  const pitchScale=Math.max(0.45,Math.min(1.0,(faceH/(faceW||1))*0.70));
+  const faceUpLen=Math.hypot(x10-x152,y10-y152)||1;
   const uX=(x10-x152)/faceUpLen, uY=(y10-y152)/faceUpLen;
-
   const sx=smoothHatX.update(x10), sy=smoothHatY.update(y10);
   const sw=smoothFW.update(faceW),  sa=smoothRoll.update(rollAngle);
   const sp=smoothPitch.update(pitchScale);
-
   const hatW=sw*1.25, hatH=hatW*(900/800)*sp;
   const anchorY=hatH*BRIM_BOTTOM_FRAC;
   const pitchOff=(1.0-sp)*hatH*0.18;
-
   ctx.save();
-  ctx.translate(sx - uX*pitchOff, sy - uY*pitchOff);
+  ctx.translate(sx-uX*pitchOff, sy-uY*pitchOff);
   ctx.rotate(sa);
   ctx.shadowColor='rgba(0,20,0,0.5)';
   ctx.shadowBlur=14*window.devicePixelRatio;
   ctx.shadowOffsetY=5*window.devicePixelRatio;
   ctx.drawImage(hatImg,-hatW/2,-anchorY,hatW,hatH);
   ctx.restore();
-
   return { rcx:sx, rcy:sy-anchorY+hatH*CROWN_TOP_FRAC, faceW:sw };
 }
 
@@ -530,14 +448,18 @@ function drawHat(lm) {
 // Debug overlay
 // ─────────────────────────────────────────
 function drawDebug() {
-  const status = isLookingUp ? '👆 EYES UP' : '😐 straight';
+  const warmup = smileSamples.length < SMILE_BASELINE_FRAMES && smileBaseline === null;
+  const baseline = smileBaseline !== null ? smileBaseline.toFixed(3) : '…';
+  const status = warmup
+    ? `calibrating ${smileSamples.length}/${SMILE_BASELINE_FRAMES}`
+    : isSmiling ? '😄 SMILING' : '😐 neutral';
   const dpr = window.devicePixelRatio;
   ctx.save();
   ctx.font=`bold ${13*dpr}px -apple-system,sans-serif`;
   ctx.fillStyle='rgba(0,0,0,0.55)';
-  ctx.fillRect(8,8,240*dpr,30*dpr);
-  ctx.fillStyle=isLookingUp?'#00ff88':'#fff';
-  ctx.fillText(`gaze: ${dbgGaze.toFixed(3)}  ${status}`, 14, 26*dpr);
+  ctx.fillRect(8,8,280*dpr,30*dpr);
+  ctx.fillStyle=isSmiling?'#00ff88':'#fff';
+  ctx.fillText(`smile: ${dbgSmile.toFixed(3)} base:${baseline}  ${status}`, 14, 26*dpr);
   ctx.restore();
 }
 
@@ -555,14 +477,14 @@ function onResults(results) {
   ctx.drawImage(video, ox, oy, rW, rH);
   ctx.restore();
 
-  // 2. Ambient
+  // 2. Ambient shamrocks
   if (ambient.length===0) initAmbient();
   stepAmbient();
 
-  // 3. Coin pile (behind pot rim)
-  drawPile();
+  // 3. PNG coin pile (behind pot rim)
+  drawSettledPile();
 
-  // 4. Pot (rim over pile base)
+  // 4. Pot (rim sits on top of pile)
   drawPot();
 
   let hatAnchor = null;
@@ -573,22 +495,22 @@ function onResults(results) {
     drawFaceGrading(lm);
     hatAnchor = drawHat(lm);
     drawCheekStickers(lm);
-    updateGaze(lm);
+    updateSmile(lm);
   } else {
-    gazeFrames  = Math.max(gazeFrames - 1, 0);
-    isLookingUp = gazeFrames >= GAZE_FRAMES_ON;
+    smileFrames = Math.max(smileFrames - 1, 0);
+    isSmiling   = smileFrames >= 4;
   }
 
-  // 6. Rainbow
-  rainbowTarget = isLookingUp ? 0.60 : 0;
+  // 6. Rainbow (shows when smiling)
+  rainbowTarget = isSmiling ? 0.60 : 0;
   rainbowAlpha += (rainbowTarget - rainbowAlpha) * 0.08;
-  if (hatAnchor) drawRainbow(hatAnchor.rcx, hatAnchor.rcy, hatAnchor.faceW*1.1);
+  if (hatAnchor) drawRainbow(hatAnchor.rcx, hatAnchor.rcy, hatAnchor.faceW * 1.1);
 
-  // 7. Coins
-  if (isLookingUp) spawnFromSky();
+  // 7. Coins fall while smiling
+  if (isSmiling) spawnFromSky();
   stepFalling();
 
-  // 8. Debug (remove once confirmed)
+  // 8. Debug
   drawDebug();
 }
 
@@ -599,7 +521,7 @@ async function start() {
   const fm = new FaceMesh({ locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
   fm.setOptions({
     maxNumFaces: 1,
-    refineLandmarks: true,   // REQUIRED for iris landmarks 468+
+    refineLandmarks: true,
     minDetectionConfidence: 0.5,
     minTrackingConfidence:  0.5,
   });
@@ -619,8 +541,9 @@ async function start() {
 flipBtn.addEventListener('click', () => {
   currentFacingMode = currentFacingMode==='user'?'environment':'user';
   smoothHatX.reset(); smoothHatY.reset(); smoothFW.reset();
-  smoothRoll.reset(); smoothPitch.reset(); smoothGaze.reset();
-  gazeFrames=0; isLookingUp=false;
+  smoothRoll.reset(); smoothPitch.reset(); smoothSmile.reset();
+  smileFrames=0; isSmiling=false;
+  smileSamples=[]; smileBaseline=null;
   start();
 });
 
@@ -634,7 +557,7 @@ shutterBtn.addEventListener('click', async () => {
     const blob=await new Promise(r=>off.toBlob(r,'image/png'));
     const file=new File([blob],'stpaddys.png',{type:'image/png'});
     if (navigator.canShare?.({files:[file]})) {
-      await navigator.share({files:[file],title:'☘️ Happy St. Patrick\'s Day!'});
+      await navigator.share({files:[file],title:"☘️ Happy St. Patrick's Day!"});
     } else {
       const url=URL.createObjectURL(blob);
       const a=Object.assign(document.createElement('a'),{href:url,download:'stpaddys.png'});
