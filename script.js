@@ -1,5 +1,5 @@
 // ☘️ St. Patrick's Day Filter v15
-// Dome-shaped coin pile ·  text PNG · smile/teeth trigger
+// Dome-shaped coin pile · pot text PNG · smile/teeth trigger
 
 const video      = document.getElementById('video');
 const canvas     = document.getElementById('canvas');
@@ -18,7 +18,7 @@ function loadImg(src) { const i = new Image(); i.src = src; return i; }
 const hatImg     = loadImg('assets/leprechaun_hat.png');
 const shamrockImg= loadImg('assets/shamrock.png');
 const coinImg    = loadImg('assets/coin.png');
-const TextImg = loadImg('assets/pot_text.png');  // swap this file to change text
+const potTextImg = loadImg('assets/pot_text.png');  // swap this file to change text
 
 // ─────────────────────────────────────────
 // Canvas
@@ -81,7 +81,7 @@ let smileBaseline=null, smileSamples=[];
 const SMILE_CAL=45, SMILE_RISE=0.040, TEETH_THRESH=0.032;
 
 function updateTrigger(lm) {
-  const mW=Math.hy(lm[291].x-lm[61].x,lm[291].y-lm[61].y);
+  const mW=Math.hypot(lm[291].x-lm[61].x,lm[291].y-lm[61].y);
   const fW=Math.abs(lm[454].x-lm[234].x)||0.01;
   const sr=smoothSmile.update(mW/fW);
 
@@ -105,12 +105,12 @@ function updateTrigger(lm) {
 }
 
 // ─────────────────────────────────────────
-//  geometry
+// Pot geometry
 // ─────────────────────────────────────────
-function get() {
+function getPot() {
   return {
     cx:   canvas.width  * 0.5,
-    rimY: canvas.height * 0.805,
+    rimY: canvas.height * 0.80,
     rimRX:canvas.width  * 0.47,
     rimRY:canvas.width  * 0.47 * 0.085,
   };
@@ -149,7 +149,7 @@ function updatePileFade() {
 function pCS() { return Math.round(canvas.width * 0.040); }
 
 function addCoinToPile(x) {
-  const {cx,rimRX}=get();
+  const {cx,rimRX}=getPot();
   if (Math.abs(x-cx)>rimRX*0.88) return;
   const t=(x-(cx-rimRX*0.88))/(rimRX*1.76);
   const slot=Math.max(0,Math.min(PILE_SLOTS-1,Math.floor(t*PILE_SLOTS)));
@@ -163,7 +163,7 @@ function addCoinToPile(x) {
 }
 
 function surfaceYAt(x) {
-  const {cx,rimY,rimRX}=get();
+  const {cx,rimY,rimRX}=getPot();
   if (Math.abs(x-cx)>rimRX*0.92) return rimY;
   const t=(x-(cx-rimRX*0.88))/(rimRX*1.76);
   const slot=Math.max(0,Math.min(PILE_SLOTS-1,Math.floor(t*PILE_SLOTS)));
@@ -173,7 +173,7 @@ function surfaceYAt(x) {
 // Draw the dome pile with coin PNGs
 function drawPile() {
   if (slotCount.every(c=>c===0)) return;
-  const {cx,rimY,rimRX}=get();
+  const {cx,rimY,rimRX}=getPot();
   const cs=pCS();
   const slotW=(rimRX*1.76)/PILE_SLOTS;
   const startX=cx-rimRX*0.88;
@@ -181,7 +181,7 @@ function drawPile() {
   ctx.save();
   ctx.globalAlpha=pileAlpha;
 
-  // Hard clip to  opening
+  // Hard clip to pot opening
   ctx.beginPath();
   ctx.rect(cx-rimRX*0.91, 0, rimRX*1.82, rimY+cs);
   ctx.clip();
@@ -212,10 +212,10 @@ function drawPile() {
 }
 
 // ─────────────────────────────────────────
-//  of gold + text label on the body
+// Pot of gold + text label on the body
 // ─────────────────────────────────────────
-function draw() {
-  const {cx,rimY,rimRX,rimRY}=get();
+function drawPot() {
+  const {cx,rimY,rimRX,rimRY}=getPot();
   const bodyR =rimRX*0.98;
   const bodyCY=rimY+bodyR*0.04;
 
@@ -235,17 +235,17 @@ function draw() {
   ctx.fillStyle='rgba(120,120,120,0.16)'; ctx.fill();
   ctx.restore();
 
-  // ── Text on  body ───────────────────────────────────────
+  // ── Text on pot body ───────────────────────────────────────
   // Positioned on the visible cauldron face, below the rim
-  if (TextImg.complete && TextImg.naturalWidth > 0) {
+  if (potTextImg.complete && potTextImg.naturalWidth > 0) {
     const txtW = rimRX * 1.60;
-    const txtH = txtW * (TextImg.naturalHeight / TextImg.naturalWidth);
+    const txtH = txtW * (potTextImg.naturalHeight / potTextImg.naturalWidth);
     const txtX = cx - txtW / 2;
     const txtY = rimY + rimRY * 0.8;       // just below rim
     ctx.save();
     // Clip to body so text doesn't spill outside cauldron
     ctx.beginPath(); ctx.rect(0, rimY, canvas.width, canvas.height); ctx.clip();
-    ctx.drawImage(TextImg, txtX, txtY, txtW, txtH);
+    ctx.drawImage(potTextImg, txtX, txtY, txtW, txtH);
     ctx.restore();
   }
 
@@ -299,7 +299,7 @@ function spawnFromSky() {
 }
 
 function stepFalling() {
-  const {rimY,cx,rimRX}=get();
+  const {rimY,cx,rimRX}=getPot();
   const toRemove=[];
   for (let i=0;i<falling.length;i++) {
     const p=falling[i];
@@ -363,7 +363,7 @@ function drawFaceGrading(lm) {
   const [x234,y234]=lmToCanvas(lm[234]), [x454,y454]=lmToCanvas(lm[454]);
   const [x10,y10]=lmToCanvas(lm[10]),    [x152,y152]=lmToCanvas(lm[152]);
   const fcx=(x234+x454)/2, fcy=(y10+y152)/2;
-  const faceW=Math.hy(x454-x234,y454-y234), faceH=Math.abs(y152-y10)*1.05;
+  const faceW=Math.hypot(x454-x234,y454-y234), faceH=Math.abs(y152-y10)*1.05;
   ctx.save();
   ctx.beginPath(); ctx.ellipse(fcx,fcy,faceW*.52,faceH*.52,0,0,Math.PI*2); ctx.clip();
   const g=ctx.createRadialGradient(fcx,fcy-faceH*.1,0,fcx,fcy,faceW*.55);
@@ -378,7 +378,7 @@ function drawFaceGrading(lm) {
 function drawCheekStickers(lm) {
   const [x234]=lmToCanvas(lm[234]), [,y234]=lmToCanvas(lm[234]);
   const [x454]=lmToCanvas(lm[454]), [,y454]=lmToCanvas(lm[454]);
-  const faceW=Math.hy(x454-x234,y454-y234), size=faceW*.13;
+  const faceW=Math.hypot(x454-x234,y454-y234), size=faceW*.13;
   for (const idx of [50,280]) {
     const [cx,cy]=lmToCanvas(lm[idx]);
     ctx.save(); ctx.globalAlpha=.75;
@@ -394,12 +394,12 @@ function drawHat(lm) {
   const [x10,y10]=lmToCanvas(lm[10]),   [x152,y152]=lmToCanvas(lm[152]);
   const [x234,y234]=lmToCanvas(lm[234]),[x454,y454]=lmToCanvas(lm[454]);
   const [xL,yL,xR,yR]=x234<=x454?[x234,y234,x454,y454]:[x454,y454,x234,y234];
-  const rollAngle=Math.atan2(yR-yL,xR-xL), faceW=Math.hy(xR-xL,yR-yL);
+  const rollAngle=Math.atan2(yR-yL,xR-xL), faceW=Math.hypot(xR-xL,yR-yL);
   const faceH=Math.abs(y152-y10);
   const pitchScale=Math.max(.40,Math.min(1.0,(faceH/(faceW||1))*.70));
 
   // Face-up unit vector (chin→forehead direction in canvas space)
-  const fUpLen=Math.hy(x10-x152,y10-y152)||1;
+  const fUpLen=Math.hypot(x10-x152,y10-y152)||1;
   const uX=(x10-x152)/fUpLen, uY=(y10-y152)/fUpLen;
 
   const sx=smoothHatX.update(x10), sy=smoothHatY.update(y10);
@@ -451,8 +451,8 @@ function onResults(results) {
 
   updatePileFade();
 
-  // Draw order:  body → pile on top →  rim over pile base
-  draw();
+  // Draw order: pot body → pile on top → pot rim over pile base
+  drawPot();
   drawPile();
 
   let ha=null;
