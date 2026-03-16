@@ -396,20 +396,41 @@ function drawHat(lm) {
   const [xL,yL,xR,yR]=x234<=x454?[x234,y234,x454,y454]:[x454,y454,x234,y234];
   const rollAngle=Math.atan2(yR-yL,xR-xL), faceW=Math.hypot(xR-xL,yR-yL);
   const faceH=Math.abs(y152-y10);
-  const pitchScale=Math.max(.45,Math.min(1.0,(faceH/(faceW||1))*.70));
+  const pitchScale=Math.max(.40,Math.min(1.0,(faceH/(faceW||1))*.70));
+
+  // Face-up unit vector (chin→forehead direction in canvas space)
   const fUpLen=Math.hypot(x10-x152,y10-y152)||1;
   const uX=(x10-x152)/fUpLen, uY=(y10-y152)/fUpLen;
+
   const sx=smoothHatX.update(x10), sy=smoothHatY.update(y10);
   const sw=smoothFW.update(faceW),  sa=smoothRoll.update(rollAngle);
   const sp=smoothPitch.update(pitchScale);
-  const hatW=sw*1.55, hatH=hatW*(900/800)*sp;
-  const anchorY=hatH*BRIM_BOTTOM_FRAC, pOff=(1-sp)*hatH*.18;
+
+  const hatW=sw*1.55;
+  // Keep hatH proportional to the UNSCALED hat — pitch only affects vertical draw,
+  // not the anchor distance, so the brim stays glued to the forehead when tilting.
+  const hatHFull =hatW*(900/800);          // full height (no pitch)
+  const hatHDraw =hatHFull*sp;             // compressed height for drawing
+
+  // Anchor: brim bottom of FULL hat — so tilting doesn't change where it sits
+  const anchorFull=hatHFull*BRIM_BOTTOM_FRAC;
+
+  // Shift hat DOWN along face axis so brim overlaps forehead correctly.
+  // Positive offset moves toward chin (downward along face-up vector reversed).
+  const downShift = hatHFull * 0.28;       // push down 28% of full hat height
+
+  const anchorDraw=hatHDraw*BRIM_BOTTOM_FRAC;
+
   ctx.save();
-  ctx.translate(sx-uX*pOff, sy-uY*pOff+hatH*0.12); ctx.rotate(sa);
+  // Translate to forehead, rotate for roll, then push down in rotated hat space
+  // so the offset follows the head tilt correctly
+  ctx.translate(sx, sy);
+  ctx.rotate(sa);
+  ctx.translate(0, downShift);  // now "down" is along the hat's local Y axis
   ctx.shadowColor='rgba(0,20,0,.5)'; ctx.shadowBlur=14*window.devicePixelRatio;
   ctx.shadowOffsetY=5*window.devicePixelRatio;
-  ctx.drawImage(hatImg,-hatW/2,-anchorY,hatW,hatH); ctx.restore();
-  return {rcx:sx, rcy:sy-anchorY+hatH*CROWN_TOP_FRAC, faceW:sw};
+  ctx.drawImage(hatImg,-hatW/2,-anchorDraw,hatW,hatHDraw); ctx.restore();
+  return {rcx:sx, rcy:sy-anchorFull+hatHFull*CROWN_TOP_FRAC, faceW:sw};
 }
 
 // ─────────────────────────────────────────
