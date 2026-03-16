@@ -1,6 +1,6 @@
-// ☘️ St. Patrick's Day Filter v6
-// Fixes: pot clipped below rim · look-up uses nose-chin/face-width ratio
-// Pile starts at rimY, stops at chinY
+// ☘️ St. Patrick's Day Filter v8
+// Look-up: chin Y in canvas space — looking up = chin moves toward top (Y decreases)
+// Denser pile: smaller settled coins, tighter random packing, more columns
 
 const video      = document.getElementById('video');
 const canvas     = document.getElementById('canvas');
@@ -78,62 +78,89 @@ const smoothX    = new Smoother(0.3);
 const smoothY    = new Smoother(0.3);
 const smoothFW   = new Smoother(0.25);
 const smoothAng  = new AngleSmoother(0.2);
-const smoothChin = new Smoother(0.05);
+const smoothChin = new Smoother(0.08);  // pile limit tracker
+
+// ─────────────────────────────────────────
+// Look-up detection — chin canvas Y
+// ─────────────────────────────────────────
+// Strategy: collect a rolling baseline of chin Y over the first ~60 frames.
+// When chin rises more than THRESHOLD px above baseline → looking up.
+// This is distance/person-agnostic.
+
+let chinBaseline  = null;   // stable resting chin Y (canvas px)
+let baselineSamples = [];
+const BASELINE_FRAMES = 60;      // frames to collect before activating
+const LOOKUP_RISE_PX  = 0.05;    // fraction of canvas height chin must rise above baseline
+
+let lookUpFrames  = 0;
+let isLookingUp   = false;
+let chinCanvasY   = 0;
+let smoothedChinY = null;  // EMA for look-up detection (faster alpha)
+
+function updateLookUp(lm) {
+  const [, cy] = lmToCanvas(lm[152]);  // chin in canvas px
+  chinCanvasY = cy;
+
+  // Fast EMA just for the look-up signal (separate from pile limit smoother)
+  smoothedChinY = smoothedChinY === null ? cy : smoothedChinY * 0.75 + cy * 0.25;
+
+  // Accumulate baseline during warm-up
+  if (baselineSamples.length < BASELINE_FRAMES) {
+    baselineSamples.push(smoothedChinY);
+    if (baselineSamples.length === BASELINE_FRAMES) {
+      // Use median of samples as baseline (robust to any stray frames)
+      const sorted = [...baselineSamples].sort((a, b) => a - b);
+      chinBaseline = sorted[Math.floor(sorted.length / 2)];
+    }
+    isLookingUp = false;
+    return;
+  }
+
+  // Recalibrate baseline slowly so posture drift doesn't lock out the trigger
+  // Only update when NOT looking up (so the trigger doesn't cancel itself)
+  const threshold = canvas.height * LOOKUP_RISE_PX;
+  const risen = smoothedChinY < chinBaseline - threshold;
+
+  if (!risen) {
+    // Drift baseline toward current position very slowly (≈every 180 frames it fully adapts)
+    chinBaseline = chinBaseline * 0.994 + smoothedChinY * 0.006;
+  }
+
+  lookUpFrames = risen
+    ? Math.min(lookUpFrames + 1, 16)
+    : Math.max(lookUpFrames - 2,  0);
+
+  isLookingUp = lookUpFrames >= 6;
+}
 
 // ─────────────────────────────────────────
 // Pot geometry
 // ─────────────────────────────────────────
 function getPot() {
   const cx    = canvas.width  * 0.5;
-  const rimY  = canvas.height * 0.83;   // top of the pot opening
-  const rimRX = canvas.width  * 0.47;   // nearly full-width opening
-  const rimRY = rimRX * 0.085;          // slim ellipse for the rim band
+  const rimY  = canvas.height * 0.83;
+  const rimRX = canvas.width  * 0.47;
+  const rimRY = rimRX * 0.085;
   return { cx, rimY, rimRX, rimRY };
 }
 
 // ─────────────────────────────────────────
-// Look-up detection
+// Pile — column height-map + settled PNGs
 // ─────────────────────────────────────────
-// Use (chin_y - nose_tip_y) / face_width (all in normalised 0-1 space).
-// Straight ahead: ratio ≈ 0.65–0.90
-// Looking up   : ratio drops to ~0.35–0.50 as chin foreshortens toward nose
-let lookUpFrames = 0;
-let isLookingUp  = false;
-let debugRatio   = 0;  // shown on screen so threshold can be tuned
-
-function updateLookUp(lm) {
-  const noseChinDist = lm[152].y - lm[4].y;   // chin Y - nose tip Y (positive normally)
-  const faceWidth    = Math.abs(lm[454].x - lm[234].x);
-  const ratio        = faceWidth > 0.01 ? noseChinDist / faceWidth : 1;
-  debugRatio         = ratio;
-
-  const lookingUp    = ratio > 0.37;  // up=0.4 is highest, straight~0.3, down=0.2  // below this = head tilted back
-  lookUpFrames = lookingUp
-    ? Math.min(lookUpFrames + 1, 16)
-    : Math.max(lookUpFrames - 2, 0);
-  isLookingUp = lookUpFrames >= 8;
-}
-
-// ─────────────────────────────────────────
-// Pile  (column height-map + settled PNGs)
-// ─────────────────────────────────────────
-const NUM_COLS = 62;
+const NUM_COLS = 90;          // more columns = finer packing resolution
 let colSurface = [];
 let settled    = [];
-let chinY      = -1;
+let pileChainY = -1;          // tracked chin for pile ceiling
 
 function potFloorForCol(c) {
   const { cx, rimY, rimRX } = getPot();
-  const colW   = canvas.width / NUM_COLS;
-  const colCX  = (c + 0.5) * colW;
-  const dist   = Math.abs(colCX - cx);
-  // Inside pot opening → floor at rimY; outside → floor at canvas bottom
-  return dist < rimRX * 0.95 ? rimY : canvas.height + 20;
+  const colW  = canvas.width / NUM_COLS;
+  const colCX = (c + 0.5) * colW;
+  return Math.abs(colCX - cx) < rimRX * 0.95 ? rimY : canvas.height + 20;
 }
 
 function initPile() {
   colSurface = Array.from({ length: NUM_COLS }, (_, c) => potFloorForCol(c));
-  // don't clear settled[] — keep pile across resizes
 }
 
 function colIndex(x) {
@@ -142,32 +169,41 @@ function colIndex(x) {
 function surfaceAt(x) { return colSurface[colIndex(x)]; }
 
 function getPileLimit() {
-  // Stop at chin level (or 48% down screen if chin not yet tracked)
-  return chinY > 0 ? chinY + 4 : canvas.height * 0.48;
+  return pileChainY > 0 ? pileChainY + 4 : canvas.height * 0.48;
 }
 
 function settleCoin(coin) {
   const colW = canvas.width / NUM_COLS;
-  const c0 = Math.max(0, Math.floor((coin.x - coin.size * 0.46) / colW));
-  const c1 = Math.min(NUM_COLS - 1, Math.floor((coin.x + coin.size * 0.46) / colW));
+
+  // Random jitter so coins don't land perfectly centred — creates organic pile
+  const jitter = (Math.random() - 0.5) * coin.size * 0.55;
+  const landX  = Math.max(coin.size * 0.5, Math.min(canvas.width - coin.size * 0.5, coin.x + jitter));
+
+  const c0 = Math.max(0, Math.floor((landX - coin.size * 0.44) / colW));
+  const c1 = Math.min(NUM_COLS - 1, Math.floor((landX + coin.size * 0.44) / colW));
 
   let surface = canvas.height;
   for (let c = c0; c <= c1; c++) surface = Math.min(surface, colSurface[c]);
 
-  const settledY  = surface - coin.size * 0.36;
+  // Sink coins slightly into each other for a denser look
+  const settledY  = surface - coin.size * 0.52;
   const pileLimit = getPileLimit();
-  if (settledY < pileLimit) return; // pile full at this column
+  if (settledY < pileLimit) return;
 
   for (let c = c0; c <= c1; c++) {
-    const ns = Math.min(colSurface[c], settledY - coin.size * 0.32);
+    const ns = Math.min(colSurface[c], settledY - coin.size * 0.42);
     colSurface[c] = Math.max(ns, pileLimit);
   }
 
-  settled.push({ x: coin.x, y: settledY, size: coin.size, img: coin.img, rot: coin.rot });
-  if (settled.length > 220) settled.splice(0, settled.length - 220);
+  // Random tilt when settled (-25° to +25°)
+  const settledRot = (Math.random() - 0.5) * 0.9;
+
+  settled.push({ x: landX, y: settledY, size: coin.size, img: coin.img, rot: settledRot });
+  if (settled.length > 280) settled.splice(0, settled.length - 280);
 }
 
 function drawSettled() {
+  // Draw back-to-front so top of pile is on top visually
   for (const s of settled) {
     ctx.save();
     ctx.translate(s.x, s.y); ctx.rotate(s.rot);
@@ -177,16 +213,16 @@ function drawSettled() {
 }
 
 // ─────────────────────────────────────────
-// Pot of gold — rim + body clipped below rim
+// Pot of gold
 // ─────────────────────────────────────────
 function drawPot() {
   const { cx, rimY, rimRX, rimRY } = getPot();
-  const bodyR  = rimRX * 0.98;           // large enough to extend off screen
-  const bodyCY = rimY + bodyR * 0.04;    // center just below rim so TOP of circle ≈ rimY
+  const bodyR  = rimRX * 0.98;
+  const bodyCY = rimY + bodyR * 0.04;
 
   ctx.save();
 
-  // ── Body: clip to everything BELOW the rim Y line ──────────────
+  // Body clipped below rim
   ctx.save();
   ctx.beginPath();
   ctx.rect(0, rimY - 2, canvas.width, canvas.height - rimY + 4);
@@ -205,22 +241,19 @@ function drawPot() {
   ctx.fillStyle = bg;
   ctx.fill();
 
-  // left-side highlight
   ctx.beginPath();
   ctx.ellipse(cx - bodyR * 0.26, bodyCY - bodyR * 0.12, bodyR * 0.11, bodyR * 0.34, -0.22, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(120,120,120,0.16)';
   ctx.fill();
+  ctx.restore();
 
-  ctx.restore(); // end body clip
-
-  // ── Gold rim ellipse — drawn on top, no clip ───────────────────
-  // Outer dark shadow band
+  // Rim shadow
   ctx.beginPath();
   ctx.ellipse(cx, rimY + rimRY * 0.6, rimRX * 0.98, rimRY * 0.65, 0, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(0,0,0,0.65)';
   ctx.fill();
 
-  // Gold face
+  // Gold rim
   ctx.beginPath();
   ctx.ellipse(cx, rimY, rimRX, rimRY, 0, 0, Math.PI * 2);
   const rg = ctx.createLinearGradient(cx - rimRX, rimY - rimRY, cx + rimRX, rimY + rimRY);
@@ -232,13 +265,13 @@ function drawPot() {
   ctx.fillStyle = rg;
   ctx.fill();
 
-  // Inner opening shadow
+  // Inner shadow
   ctx.beginPath();
   ctx.ellipse(cx, rimY + rimRY * 0.28, rimRX * 0.82, rimRY * 0.52, 0, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(0,0,0,0.60)';
   ctx.fill();
 
-  // Shine highlight
+  // Shine
   ctx.beginPath();
   ctx.ellipse(cx - rimRX * 0.23, rimY - rimRY * 0.28, rimRX * 0.26, rimRY * 0.30, -0.14, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(255,255,215,0.42)';
@@ -255,26 +288,27 @@ let lastSpawnMs = 0;
 
 function spawnFromSky() {
   const now = performance.now();
-  if (now - lastSpawnMs < 90) return;
+  if (now - lastSpawnMs < 80) return;
   lastSpawnMs = now;
 
   for (let i = 0; i < 3; i++) {
     const isCoin = Math.random() < 0.65;
-    const base   = isCoin ? (20 + Math.random() * 22) : (14 + Math.random() * 16);
-    const size   = base * window.devicePixelRatio;
+    // Smaller settled size for denser packing — falling shows at 1.4× then shrinks on land
+    const base = isCoin ? (13 + Math.random() * 14) : (10 + Math.random() * 12);
+    const size = base * window.devicePixelRatio;
     falling.push({
       x:    canvas.width * (0.05 + Math.random() * 0.90),
       y:    -size,
-      vx:   (Math.random() - 0.5) * 3.2,
-      vy:   1.2 + Math.random() * 1.8,
-      ay:   0.24 + Math.random() * 0.10,
+      vx:   (Math.random() - 0.5) * 3.5,
+      vy:   1.4 + Math.random() * 2.0,
+      ay:   0.26 + Math.random() * 0.10,
       rot:  Math.random() * Math.PI * 2,
-      spin: (Math.random() - 0.5) * 0.10,
+      spin: (Math.random() - 0.5) * 0.12,
       size,
       img:  isCoin ? coinImg : shamrockImg,
     });
   }
-  if (falling.length > 130) falling.splice(0, falling.length - 130);
+  if (falling.length > 140) falling.splice(0, falling.length - 140);
 }
 
 function stepFalling() {
@@ -283,12 +317,10 @@ function stepFalling() {
     const p = falling[i];
     p.vy += p.ay; p.x += p.vx; p.y += p.vy; p.rot += p.spin;
 
-    // Bounce off screen edges
-    if (p.x - p.size * 0.5 < 0)             { p.x = p.size * 0.5;              p.vx =  Math.abs(p.vx) * 0.6; }
-    if (p.x + p.size * 0.5 > canvas.width)  { p.x = canvas.width - p.size*0.5; p.vx = -Math.abs(p.vx) * 0.6; }
+    if (p.x - p.size * 0.5 < 0)            { p.x = p.size * 0.5;              p.vx =  Math.abs(p.vx) * 0.6; }
+    if (p.x + p.size * 0.5 > canvas.width) { p.x = canvas.width - p.size*0.5; p.vx = -Math.abs(p.vx) * 0.6; }
 
-    const surface = surfaceAt(p.x);
-    if (p.y + p.size * 0.5 >= surface) {
+    if (p.y + p.size * 0.5 >= surfaceAt(p.x)) {
       settleCoin(p);
       toRemove.push(i);
       continue;
@@ -310,7 +342,7 @@ function initAmbient() {
   for (let i = 0; i < 5; i++) ambient.push({
     x: Math.random() * canvas.width,
     y: canvas.height + Math.random() * canvas.height,
-    size: (11 + Math.random() * 14) * window.devicePixelRatio,
+    size: (10 + Math.random() * 13) * window.devicePixelRatio,
     vx: (Math.random() - 0.5) * 0.55, vy: -(0.3 + Math.random() * 0.4),
     rot: Math.random() * Math.PI * 2, spin: (Math.random() - 0.5) * 0.016,
     alpha: 0.10 + Math.random() * 0.12,
@@ -352,19 +384,19 @@ function drawFaceGrading(lm) {
   const [x454, y454] = lmToCanvas(lm[454]);
   const [x10,  y10 ] = lmToCanvas(lm[10]);
   const [x152, y152] = lmToCanvas(lm[152]);
-  const fcx   = (x234 + x454) / 2, fcy = (y10 + y152) / 2;
-  const faceW = Math.hypot(x454 - x234, y454 - y234);
-  const faceH = Math.abs(y152 - y10) * 1.05;
+  const fcx = (x234+x454)/2, fcy = (y10+y152)/2;
+  const faceW = Math.hypot(x454-x234, y454-y234);
+  const faceH = Math.abs(y152-y10)*1.05;
   ctx.save();
   ctx.beginPath();
-  ctx.ellipse(fcx, fcy, faceW * 0.52, faceH * 0.52, 0, 0, Math.PI * 2);
+  ctx.ellipse(fcx, fcy, faceW*0.52, faceH*0.52, 0, 0, Math.PI*2);
   ctx.clip();
-  const g = ctx.createRadialGradient(fcx, fcy - faceH*0.1, 0, fcx, fcy, faceW*0.55);
+  const g = ctx.createRadialGradient(fcx, fcy-faceH*0.1, 0, fcx, fcy, faceW*0.55);
   g.addColorStop(0,   'rgba(0,200,50,0.00)');
   g.addColorStop(0.5, 'rgba(0,180,40,0.05)');
   g.addColorStop(1,   'rgba(0,140,30,0.13)');
   ctx.fillStyle = g;
-  ctx.fillRect(fcx - faceW, fcy - faceH, faceW * 2, faceH * 2);
+  ctx.fillRect(fcx-faceW, fcy-faceH, faceW*2, faceH*2);
   ctx.restore();
 }
 
@@ -372,14 +404,16 @@ function drawFaceGrading(lm) {
 // Cheek shamrocks
 // ─────────────────────────────────────────
 function drawCheekStickers(lm) {
-  const [x234, y234] = lmToCanvas(lm[234]);
-  const [x454, y454] = lmToCanvas(lm[454]);
-  const faceW = Math.hypot(x454 - x234, y454 - y234);
-  const size  = faceW * 0.13;
+  const [x234] = lmToCanvas(lm[234]);
+  const [x454] = lmToCanvas(lm[454]);
+  const [,y234] = lmToCanvas(lm[234]);
+  const [,y454] = lmToCanvas(lm[454]);
+  const faceW = Math.hypot(x454-x234, y454-y234);
+  const size = faceW * 0.13;
   for (const idx of [50, 280]) {
     const [cx, cy] = lmToCanvas(lm[idx]);
     ctx.save(); ctx.globalAlpha = 0.75;
-    ctx.drawImage(shamrockImg, cx - size/2, cy - size/2, size, size);
+    ctx.drawImage(shamrockImg, cx-size/2, cy-size/2, size, size);
     ctx.restore();
   }
 }
@@ -395,39 +429,45 @@ function drawHat(lm) {
   const [x234, y234] = lmToCanvas(lm[234]);
   const [x454, y454] = lmToCanvas(lm[454]);
   const [xL, yL, xR, yR] = x234 <= x454 ? [x234,y234,x454,y454] : [x454,y454,x234,y234];
-  const angle = Math.atan2(yR - yL, xR - xL);
-  const faceW = Math.hypot(xR - xL, yR - yL);
+  const angle = Math.atan2(yR-yL, xR-xL);
+  const faceW = Math.hypot(xR-xL, yR-yL);
   const sx = smoothX.update(x10), sy = smoothY.update(y10);
   const sw = smoothFW.update(faceW), sa = smoothAng.update(angle);
-  const hatW = sw * 1.25, hatH = hatW * (900 / 800);
+  const hatW = sw * 1.25, hatH = hatW * (900/800);
   const anchorY = hatH * BRIM_BOTTOM_FRAC;
   ctx.save();
   ctx.translate(sx, sy); ctx.rotate(sa);
   ctx.shadowColor = 'rgba(0,20,0,0.5)';
   ctx.shadowBlur  = 16 * window.devicePixelRatio;
   ctx.shadowOffsetY = 6 * window.devicePixelRatio;
-  ctx.drawImage(hatImg, -hatW / 2, -anchorY, hatW, hatH);
+  ctx.drawImage(hatImg, -hatW/2, -anchorY, hatW, hatH);
   ctx.restore();
   return { rcx: sx, rcy: sy - anchorY + hatH * CROWN_TOP_FRAC, faceW: sw };
 }
 
 // ─────────────────────────────────────────
-// Debug overlay — shows live ratio so threshold can be verified
+// Debug overlay (remove once confirmed)
 // ─────────────────────────────────────────
 function drawDebug() {
-  const label = isLookingUp ? '👆 LOOKING UP' : '😐 straight';
-  const color = isLookingUp ? '#00ff88' : '#ffffff';
+  const warmup = baselineSamples.length < BASELINE_FRAMES;
+  const status = warmup
+    ? `calibrating… ${baselineSamples.length}/${BASELINE_FRAMES}`
+    : isLookingUp ? '👆 LOOKING UP' : '😐 straight';
+  const rise   = chinBaseline !== null
+    ? (chinBaseline - smoothedChinY).toFixed(1) + 'px'
+    : '--';
+  const dpr    = window.devicePixelRatio;
   ctx.save();
-  ctx.font = `bold ${14 * window.devicePixelRatio}px -apple-system, sans-serif`;
+  ctx.font = `bold ${13 * dpr}px -apple-system, sans-serif`;
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(8, 8, 230 * window.devicePixelRatio, 26 * window.devicePixelRatio);
-  ctx.fillStyle = color;
-  ctx.fillText(`ratio: ${debugRatio.toFixed(3)}  ${label}`, 14, 24 * window.devicePixelRatio);
+  ctx.fillRect(8, 8, 260 * dpr, 30 * dpr);
+  ctx.fillStyle = isLookingUp ? '#00ff88' : '#fff';
+  ctx.fillText(`chin rise: ${rise}  ${status}`, 14, 26 * dpr);
   ctx.restore();
 }
 
 // ─────────────────────────────────────────
-// Main frame handler
+// Main frame
 // ─────────────────────────────────────────
 function onResults(results) {
   resizeCanvas();
@@ -447,7 +487,7 @@ function onResults(results) {
   // 3. Settled pile (behind pot rim)
   drawSettled();
 
-  // 4. Pot (rim on top of pile base)
+  // 4. Pot
   drawPot();
 
   let hatAnchor = null;
@@ -456,14 +496,14 @@ function onResults(results) {
   if (results.multiFaceLandmarks?.length) {
     const lm = results.multiFaceLandmarks[0];
     const [, cy152] = lmToCanvas(lm[152]);
-    chinY = smoothChin.update(cy152);
+    pileChainY = smoothChin.update(cy152);
     drawFaceGrading(lm);
     hatAnchor = drawHat(lm);
     drawCheekStickers(lm);
     updateLookUp(lm);
   } else {
     lookUpFrames = Math.max(lookUpFrames - 1, 0);
-    isLookingUp  = lookUpFrames >= 8;
+    isLookingUp  = lookUpFrames >= 6;
   }
 
   // 6. Rainbow
@@ -475,7 +515,7 @@ function onResults(results) {
   if (isLookingUp) spawnFromSky();
   stepFalling();
 
-  // 8. Debug (remove once threshold is confirmed)
+  // 8. Debug
   drawDebug();
 }
 
@@ -484,7 +524,7 @@ function onResults(results) {
 // ─────────────────────────────────────────
 async function start() {
   const fm = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
-  fm.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+  fm.setOptions({ maxNumFaces:1, refineLandmarks:true, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
   fm.onResults(onResults);
   if (camera) camera.stop();
   camera = new Camera(video, {
@@ -501,6 +541,8 @@ async function start() {
 flipBtn.addEventListener('click', () => {
   currentFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
   smoothX.reset(); smoothY.reset(); smoothFW.reset(); smoothAng.reset();
+  // Reset look-up calibration on camera flip
+  baselineSamples = []; chinBaseline = null; smoothedChinY = null;
   start();
 });
 
