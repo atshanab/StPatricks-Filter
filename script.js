@@ -110,7 +110,7 @@ function updateTrigger(lm) {
 function getPot() {
   return {
     cx:   canvas.width  * 0.5,
-    rimY: canvas.height * 0.76,
+    rimY: canvas.height * 0.70,
     rimRX:canvas.width  * 0.47,
     rimRY:canvas.width  * 0.47 * 0.085,
   };
@@ -417,7 +417,7 @@ function drawHat(lm) {
 
   // Shift hat DOWN along face axis so brim overlaps forehead correctly.
   // Positive offset moves toward chin (downward along face-up vector reversed).
-  const downShift = hatHFull * 0.08;       // push down 28% of full hat height
+  const downShift = hatHFull * -0.08;       // push down 28% of full hat height
 
   const anchorDraw=hatHDraw*BRIM_BOTTOM_FRAC;
 
@@ -458,9 +458,9 @@ function onResults(results) {
   let ha=null;
   if (results.multiFaceLandmarks?.length) {
     const lm=results.multiFaceLandmarks[0];
-    drawFaceGrading(lm);
+    // drawFaceGrading removed
     ha=drawHat(lm);
-    drawCheekStickers(lm);
+    // drawCheekStickers removed
     updateTrigger(lm);
   } else {
     triggerFrames=Math.max(triggerFrames-1,0);
