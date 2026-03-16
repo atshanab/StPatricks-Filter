@@ -417,7 +417,7 @@ function drawHat(lm) {
 
   // Shift hat DOWN along face axis so brim overlaps forehead correctly.
   // Positive offset moves toward chin (downward along face-up vector reversed).
-  const downShift = hatHFull * 0.28;       // push down 28% of full hat height
+  const downShift = hatHFull * 0.18;       // push down 28% of full hat height
 
   const anchorDraw=hatHDraw*BRIM_BOTTOM_FRAC;
 
