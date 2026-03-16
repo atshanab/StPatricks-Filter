@@ -1,6 +1,6 @@
-// ☘️ St. Patrick's Day Filter v8
-// Look-up: chin Y in canvas space — looking up = chin moves toward top (Y decreases)
-// Denser pile: smaller settled coins, tighter random packing, more columns
+// ☘️ St. Patrick's Day Filter v9
+// Hat: chin→forehead axis anchor + pitch foreshortening
+// Coins: constrained to pot opening, cartoon gold heap rendering
 
 const video      = document.getElementById('video');
 const canvas     = document.getElementById('canvas');
@@ -74,62 +74,45 @@ class AngleSmoother {
   reset() { this.v = null; }
 }
 
-const smoothX    = new Smoother(0.3);
-const smoothY    = new Smoother(0.3);
-const smoothFW   = new Smoother(0.25);
-const smoothAng  = new AngleSmoother(0.2);
-const smoothChin = new Smoother(0.08);  // pile limit tracker
+const smoothHatX   = new Smoother(0.28);
+const smoothHatY   = new Smoother(0.28);
+const smoothFW     = new Smoother(0.25);
+const smoothRoll   = new AngleSmoother(0.2);
+const smoothPitch  = new Smoother(0.18);  // pitchScale 0..1
+const smoothChin   = new Smoother(0.06);  // pile ceiling
 
 // ─────────────────────────────────────────
-// Look-up detection — chin canvas Y
+// Look-up detection (baseline chin Y)
 // ─────────────────────────────────────────
-// Strategy: collect a rolling baseline of chin Y over the first ~60 frames.
-// When chin rises more than THRESHOLD px above baseline → looking up.
-// This is distance/person-agnostic.
-
-let chinBaseline  = null;   // stable resting chin Y (canvas px)
+let chinBaseline    = null;
 let baselineSamples = [];
-const BASELINE_FRAMES = 60;      // frames to collect before activating
-const LOOKUP_RISE_PX  = 0.05;    // fraction of canvas height chin must rise above baseline
+const BASELINE_FRAMES = 60;
+const LOOKUP_RISE     = 0.05; // fraction of canvas height
 
-let lookUpFrames  = 0;
-let isLookingUp   = false;
-let chinCanvasY   = 0;
-let smoothedChinY = null;  // EMA for look-up detection (faster alpha)
+let lookUpFrames = 0;
+let isLookingUp  = false;
+let smoothedChinY = null;
 
 function updateLookUp(lm) {
-  const [, cy] = lmToCanvas(lm[152]);  // chin in canvas px
-  chinCanvasY = cy;
-
-  // Fast EMA just for the look-up signal (separate from pile limit smoother)
+  const [, cy] = lmToCanvas(lm[152]);
   smoothedChinY = smoothedChinY === null ? cy : smoothedChinY * 0.75 + cy * 0.25;
 
-  // Accumulate baseline during warm-up
   if (baselineSamples.length < BASELINE_FRAMES) {
     baselineSamples.push(smoothedChinY);
     if (baselineSamples.length === BASELINE_FRAMES) {
-      // Use median of samples as baseline (robust to any stray frames)
       const sorted = [...baselineSamples].sort((a, b) => a - b);
       chinBaseline = sorted[Math.floor(sorted.length / 2)];
     }
-    isLookingUp = false;
-    return;
+    isLookingUp = false; return;
   }
 
-  // Recalibrate baseline slowly so posture drift doesn't lock out the trigger
-  // Only update when NOT looking up (so the trigger doesn't cancel itself)
-  const threshold = canvas.height * LOOKUP_RISE_PX;
+  const threshold = canvas.height * LOOKUP_RISE;
   const risen = smoothedChinY < chinBaseline - threshold;
-
-  if (!risen) {
-    // Drift baseline toward current position very slowly (≈every 180 frames it fully adapts)
-    chinBaseline = chinBaseline * 0.994 + smoothedChinY * 0.006;
-  }
+  if (!risen) chinBaseline = chinBaseline * 0.994 + smoothedChinY * 0.006;
 
   lookUpFrames = risen
     ? Math.min(lookUpFrames + 1, 16)
-    : Math.max(lookUpFrames - 2,  0);
-
+    : Math.max(lookUpFrames - 2, 0);
   isLookingUp = lookUpFrames >= 6;
 }
 
@@ -145,75 +128,184 @@ function getPot() {
 }
 
 // ─────────────────────────────────────────
-// Pile — column height-map + settled PNGs
+// Pile — coin stack height per column
+//        Cartoon heap rendered as layered circles
 // ─────────────────────────────────────────
-const NUM_COLS = 90;          // more columns = finer packing resolution
-let colSurface = [];
-let settled    = [];
-let pileChainY = -1;          // tracked chin for pile ceiling
-
-function potFloorForCol(c) {
-  const { cx, rimY, rimRX } = getPot();
-  const colW  = canvas.width / NUM_COLS;
-  const colCX = (c + 0.5) * colW;
-  return Math.abs(colCX - cx) < rimRX * 0.95 ? rimY : canvas.height + 20;
-}
+const NUM_COLS   = 80;
+let   colHeight  = [];  // how many pixels of coins stacked per column (0 = empty)
+let   pileChainY = -1;  // chin-based ceiling in canvas px
 
 function initPile() {
-  colSurface = Array.from({ length: NUM_COLS }, (_, c) => potFloorForCol(c));
+  colHeight = new Array(NUM_COLS).fill(0);
+}
+
+function getPileLimit() {
+  // Pile stops just below the chin (or 50% down if not tracked yet)
+  return pileChainY > 0 ? pileChainY : canvas.height * 0.50;
 }
 
 function colIndex(x) {
   return Math.max(0, Math.min(NUM_COLS - 1, Math.floor(x / canvas.width * NUM_COLS)));
 }
-function surfaceAt(x) { return colSurface[colIndex(x)]; }
 
-function getPileLimit() {
-  return pileChainY > 0 ? pileChainY + 4 : canvas.height * 0.48;
+// Add coins into the pile; constrain to pot interior
+function settleCoin(coin) {
+  const { cx, rimY, rimRX } = getPot();
+
+  // Only accept coins that land inside the pot opening
+  if (Math.abs(coin.x - cx) > rimRX * 0.92) return;
+
+  const jitter = (Math.random() - 0.5) * coin.size * 0.7;
+  const landX  = Math.max(cx - rimRX * 0.88,
+                   Math.min(cx + rimRX * 0.88, coin.x + jitter));
+
+  const c0 = Math.max(0, Math.floor((landX - coin.size * 0.5) / (canvas.width / NUM_COLS)));
+  const c1 = Math.min(NUM_COLS - 1, Math.floor((landX + coin.size * 0.5) / (canvas.width / NUM_COLS)));
+
+  const increment = coin.size * 0.55; // how much each coin raises the pile
+  for (let c = c0; c <= c1; c++) {
+    const newSurface = rimY - colHeight[c] - increment;
+    if (newSurface > getPileLimit()) {
+      colHeight[c] += increment;
+    }
+  }
 }
 
-function settleCoin(coin) {
+// Draw the cartoon coin heap inside the pot
+function drawPile() {
+  const { cx, rimY, rimRX, rimRY } = getPot();
   const colW = canvas.width / NUM_COLS;
 
-  // Random jitter so coins don't land perfectly centred — creates organic pile
-  const jitter = (Math.random() - 0.5) * coin.size * 0.55;
-  const landX  = Math.max(coin.size * 0.5, Math.min(canvas.width - coin.size * 0.5, coin.x + jitter));
+  // Only draw columns that are inside the pot opening
+  let anyCoins = false;
+  for (let c = 0; c < NUM_COLS; c++) {
+    if (colHeight[c] > 1) { anyCoins = true; break; }
+  }
+  if (!anyCoins) return;
 
-  const c0 = Math.max(0, Math.floor((landX - coin.size * 0.44) / colW));
-  const c1 = Math.min(NUM_COLS - 1, Math.floor((landX + coin.size * 0.44) / colW));
+  // ── 1. Gold bulk fill ─────────────────────────────────────────
+  // Build a polygon: bottom = rimY, top = per-column surface (smooth)
+  ctx.save();
 
-  let surface = canvas.height;
-  for (let c = c0; c <= c1; c++) surface = Math.min(surface, colSurface[c]);
+  // Clip to the pot opening ellipse so gold doesn't spill out
+  ctx.beginPath();
+  ctx.ellipse(cx, rimY, rimRX * 0.93, rimRY * 2.5, 0, 0, Math.PI * 2);
+  ctx.rect(0, rimY, canvas.width, canvas.height);
+  // Use clipping to only show pile inside pot and below rim
+  ctx.beginPath();
+  // clip rect: full width below rimY, but intersected with pot opening width
+  ctx.rect(cx - rimRX * 0.92, rimY - 2, rimRX * 1.84, canvas.height);
+  ctx.clip();
 
-  // Sink coins slightly into each other for a denser look
-  const settledY  = surface - coin.size * 0.52;
-  const pileLimit = getPileLimit();
-  if (settledY < pileLimit) return;
-
-  for (let c = c0; c <= c1; c++) {
-    const ns = Math.min(colSurface[c], settledY - coin.size * 0.42);
-    colSurface[c] = Math.max(ns, pileLimit);
+  // Build smooth surface polygon
+  const points = [];
+  for (let c = 0; c < NUM_COLS; c++) {
+    const colCX = (c + 0.5) * colW;
+    if (Math.abs(colCX - cx) > rimRX * 0.92) continue;
+    const surf = rimY - colHeight[c];
+    points.push([colCX, surf]);
   }
 
-  // Random tilt when settled (-25° to +25°)
-  const settledRot = (Math.random() - 0.5) * 0.9;
+  if (points.length >= 2) {
+    // Smooth the surface with neighbour averaging
+    const smoothed = points.map(([x, y], i) => {
+      const prev = points[Math.max(0, i - 1)][1];
+      const next = points[Math.min(points.length - 1, i + 1)][1];
+      return [x, (prev + y * 2 + next) / 4];
+    });
 
-  settled.push({ x: landX, y: settledY, size: coin.size, img: coin.img, rot: settledRot });
-  if (settled.length > 280) settled.splice(0, settled.length - 280);
-}
+    // Gold fill
+    ctx.beginPath();
+    ctx.moveTo(smoothed[0][0], rimY);
+    for (const [x, y] of smoothed) ctx.lineTo(x, y);
+    ctx.lineTo(smoothed[smoothed.length - 1][0], rimY);
+    ctx.closePath();
 
-function drawSettled() {
-  // Draw back-to-front so top of pile is on top visually
-  for (const s of settled) {
-    ctx.save();
-    ctx.translate(s.x, s.y); ctx.rotate(s.rot);
-    ctx.drawImage(s.img, -s.size / 2, -s.size / 2, s.size, s.size);
-    ctx.restore();
+    const topY = Math.min(...smoothed.map(p => p[1]));
+    const grad = ctx.createLinearGradient(0, topY, 0, rimY);
+    grad.addColorStop(0,    '#FFE033');
+    grad.addColorStop(0.3,  '#FFD700');
+    grad.addColorStop(0.65, '#C89010');
+    grad.addColorStop(1,    '#9A6A08');
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // ── 2. Cartoon coin circles at the top surface ────────────────
+    // Draw overlapping coin circles along the top edge for a cartoon heap look
+    const coinR = colW * 1.1;
+    for (let i = 0; i < smoothed.length; i++) {
+      const [sx, sy] = smoothed[i];
+
+      // Only draw top-layer coins (surface near the peak)
+      const localMin = Math.min(
+        smoothed[Math.max(0, i-1)][1],
+        sy,
+        smoothed[Math.min(smoothed.length-1, i+1)][1]
+      );
+      if (sy > localMin + coinR * 0.8) continue; // skip buried coins
+
+      // Coin circle
+      ctx.beginPath();
+      ctx.arc(sx, sy, coinR, 0, Math.PI * 2);
+      const cg = ctx.createRadialGradient(
+        sx - coinR * 0.3, sy - coinR * 0.3, coinR * 0.05,
+        sx, sy, coinR
+      );
+      cg.addColorStop(0,   '#FFF176');
+      cg.addColorStop(0.4, '#FFD700');
+      cg.addColorStop(0.8, '#C89010');
+      cg.addColorStop(1,   '#8B6000');
+      ctx.fillStyle = cg;
+      ctx.fill();
+
+      // Coin edge
+      ctx.strokeStyle = 'rgba(150,90,5,0.55)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Coin shine
+      ctx.beginPath();
+      ctx.arc(sx - coinR * 0.28, sy - coinR * 0.3, coinR * 0.28, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,200,0.50)';
+      ctx.fill();
+
+      // Shamrock stamp on every 4th coin
+      if (i % 4 === 0 && shamrockImg.complete) {
+        ctx.save();
+        ctx.globalAlpha = 0.30;
+        ctx.drawImage(shamrockImg, sx - coinR * 0.7, sy - coinR * 0.7, coinR * 1.4, coinR * 1.4);
+        ctx.restore();
+      }
+    }
+
+    // ── 3. Mid-pile coin circles (every ~3 columns, below surface) ─
+    for (let i = 0; i < smoothed.length; i += 3) {
+      const [sx, sy] = smoothed[i];
+      const depth = rimY - sy; // how tall the pile is here
+      if (depth < coinR * 2.5) continue;
+
+      // Draw 1-2 partially-buried coins below the surface row
+      for (let layer = 1; layer <= 2; layer++) {
+        const ly = sy + coinR * layer * 1.6 + (Math.random() - 0.5) * coinR * 0.4;
+        if (ly > rimY - 2) continue;
+        const lx = sx + (Math.random() - 0.5) * colW * 2.2;
+
+        ctx.beginPath();
+        ctx.arc(lx, ly, coinR * 0.85, 0, Math.PI * 2);
+        ctx.fillStyle = layer === 1 ? '#E8B800' : '#C09000';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(120,70,0,0.4)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
   }
+
+  ctx.restore();
 }
 
 // ─────────────────────────────────────────
-// Pot of gold
+// Pot of gold (drawn OVER the pile)
 // ─────────────────────────────────────────
 function drawPot() {
   const { cx, rimY, rimRX, rimRY } = getPot();
@@ -222,60 +314,52 @@ function drawPot() {
 
   ctx.save();
 
-  // Body clipped below rim
+  // Body clipped below rimY
   ctx.save();
   ctx.beginPath();
   ctx.rect(0, rimY - 2, canvas.width, canvas.height - rimY + 4);
   ctx.clip();
-
   ctx.beginPath();
   ctx.arc(cx, bodyCY, bodyR, 0, Math.PI * 2);
   const bg = ctx.createRadialGradient(
-    cx - bodyR * 0.28, bodyCY - bodyR * 0.28, bodyR * 0.04,
-    cx, bodyCY, bodyR * 1.08
+    cx - bodyR*0.28, bodyCY - bodyR*0.28, bodyR*0.04,
+    cx, bodyCY, bodyR*1.08
   );
   bg.addColorStop(0,   '#5a5a5a');
   bg.addColorStop(0.3, '#2a2a2a');
   bg.addColorStop(0.7, '#131313');
   bg.addColorStop(1,   '#050505');
-  ctx.fillStyle = bg;
-  ctx.fill();
-
+  ctx.fillStyle = bg; ctx.fill();
   ctx.beginPath();
-  ctx.ellipse(cx - bodyR * 0.26, bodyCY - bodyR * 0.12, bodyR * 0.11, bodyR * 0.34, -0.22, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(120,120,120,0.16)';
-  ctx.fill();
+  ctx.ellipse(cx - bodyR*0.26, bodyCY - bodyR*0.12, bodyR*0.11, bodyR*0.34, -0.22, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(120,120,120,0.16)'; ctx.fill();
   ctx.restore();
 
   // Rim shadow
   ctx.beginPath();
-  ctx.ellipse(cx, rimY + rimRY * 0.6, rimRX * 0.98, rimRY * 0.65, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.65)';
-  ctx.fill();
+  ctx.ellipse(cx, rimY + rimRY*0.6, rimRX*0.98, rimRY*0.65, 0, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fill();
 
   // Gold rim
   ctx.beginPath();
-  ctx.ellipse(cx, rimY, rimRX, rimRY, 0, 0, Math.PI * 2);
-  const rg = ctx.createLinearGradient(cx - rimRX, rimY - rimRY, cx + rimRX, rimY + rimRY);
+  ctx.ellipse(cx, rimY, rimRX, rimRY, 0, 0, Math.PI*2);
+  const rg = ctx.createLinearGradient(cx-rimRX, rimY-rimRY, cx+rimRX, rimY+rimRY);
   rg.addColorStop(0,    '#ffe84a');
   rg.addColorStop(0.20, '#fff276');
   rg.addColorStop(0.50, '#c89010');
   rg.addColorStop(0.78, '#a06808');
   rg.addColorStop(1,    '#7a4e04');
-  ctx.fillStyle = rg;
-  ctx.fill();
+  ctx.fillStyle = rg; ctx.fill();
 
   // Inner shadow
   ctx.beginPath();
-  ctx.ellipse(cx, rimY + rimRY * 0.28, rimRX * 0.82, rimRY * 0.52, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.60)';
-  ctx.fill();
+  ctx.ellipse(cx, rimY + rimRY*0.28, rimRX*0.82, rimRY*0.52, 0, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(0,0,0,0.60)'; ctx.fill();
 
   // Shine
   ctx.beginPath();
-  ctx.ellipse(cx - rimRX * 0.23, rimY - rimRY * 0.28, rimRX * 0.26, rimRY * 0.30, -0.14, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(255,255,215,0.42)';
-  ctx.fill();
+  ctx.ellipse(cx - rimRX*0.23, rimY - rimRY*0.28, rimRX*0.26, rimRY*0.30, -0.14, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(255,255,215,0.42)'; ctx.fill();
 
   ctx.restore();
 }
@@ -283,19 +367,16 @@ function drawPot() {
 // ─────────────────────────────────────────
 // Falling coins
 // ─────────────────────────────────────────
-let falling     = [];
-let lastSpawnMs = 0;
+let falling = [], lastSpawnMs = 0;
 
 function spawnFromSky() {
   const now = performance.now();
   if (now - lastSpawnMs < 80) return;
   lastSpawnMs = now;
-
   for (let i = 0; i < 3; i++) {
-    const isCoin = Math.random() < 0.65;
-    // Smaller settled size for denser packing — falling shows at 1.4× then shrinks on land
-    const base = isCoin ? (13 + Math.random() * 14) : (10 + Math.random() * 12);
-    const size = base * window.devicePixelRatio;
+    const isCoin = Math.random() < 0.70;
+    const base   = isCoin ? (13 + Math.random() * 12) : (10 + Math.random() * 10);
+    const size   = base * window.devicePixelRatio;
     falling.push({
       x:    canvas.width * (0.05 + Math.random() * 0.90),
       y:    -size,
@@ -304,23 +385,25 @@ function spawnFromSky() {
       ay:   0.26 + Math.random() * 0.10,
       rot:  Math.random() * Math.PI * 2,
       spin: (Math.random() - 0.5) * 0.12,
-      size,
-      img:  isCoin ? coinImg : shamrockImg,
+      size, img: isCoin ? coinImg : shamrockImg,
     });
   }
-  if (falling.length > 140) falling.splice(0, falling.length - 140);
+  if (falling.length > 130) falling.splice(0, falling.length - 130);
 }
 
 function stepFalling() {
+  const { rimY } = getPot();
   const toRemove = [];
   for (let i = 0; i < falling.length; i++) {
     const p = falling[i];
     p.vy += p.ay; p.x += p.vx; p.y += p.vy; p.rot += p.spin;
 
-    if (p.x - p.size * 0.5 < 0)            { p.x = p.size * 0.5;              p.vx =  Math.abs(p.vx) * 0.6; }
-    if (p.x + p.size * 0.5 > canvas.width) { p.x = canvas.width - p.size*0.5; p.vx = -Math.abs(p.vx) * 0.6; }
+    // Bounce off screen edges
+    if (p.x - p.size*0.5 < 0)            { p.x = p.size*0.5;              p.vx =  Math.abs(p.vx)*0.6; }
+    if (p.x + p.size*0.5 > canvas.width) { p.x = canvas.width-p.size*0.5; p.vx = -Math.abs(p.vx)*0.6; }
 
-    if (p.y + p.size * 0.5 >= surfaceAt(p.x)) {
+    // Settle when hitting rim level (all coins fall to pot level)
+    if (p.y + p.size*0.5 >= rimY) {
       settleCoin(p);
       toRemove.push(i);
       continue;
@@ -328,7 +411,7 @@ function stepFalling() {
 
     ctx.save();
     ctx.translate(p.x, p.y); ctx.rotate(p.rot);
-    ctx.drawImage(p.img, -p.size / 2, -p.size / 2, p.size, p.size);
+    ctx.drawImage(p.img, -p.size/2, -p.size/2, p.size, p.size);
     ctx.restore();
   }
   for (let i = toRemove.length - 1; i >= 0; i--) falling.splice(toRemove[i], 1);
@@ -342,10 +425,10 @@ function initAmbient() {
   for (let i = 0; i < 5; i++) ambient.push({
     x: Math.random() * canvas.width,
     y: canvas.height + Math.random() * canvas.height,
-    size: (10 + Math.random() * 13) * window.devicePixelRatio,
-    vx: (Math.random() - 0.5) * 0.55, vy: -(0.3 + Math.random() * 0.4),
-    rot: Math.random() * Math.PI * 2, spin: (Math.random() - 0.5) * 0.016,
-    alpha: 0.10 + Math.random() * 0.12,
+    size: (10 + Math.random() * 12) * window.devicePixelRatio,
+    vx: (Math.random() - 0.5) * 0.5, vy: -(0.28 + Math.random() * 0.38),
+    rot: Math.random() * Math.PI * 2, spin: (Math.random() - 0.5) * 0.015,
+    alpha: 0.09 + Math.random() * 0.11,
   });
 }
 function stepAmbient() {
@@ -354,7 +437,7 @@ function stepAmbient() {
     if (p.y < -50) { p.y = canvas.height + 30; p.x = Math.random() * canvas.width; }
     ctx.save(); ctx.globalAlpha = p.alpha;
     ctx.translate(p.x, p.y); ctx.rotate(p.rot);
-    ctx.drawImage(shamrockImg, -p.size / 2, -p.size / 2, p.size, p.size);
+    ctx.drawImage(shamrockImg, -p.size/2, -p.size/2, p.size, p.size);
     ctx.restore();
   }
 }
@@ -409,7 +492,7 @@ function drawCheekStickers(lm) {
   const [,y234] = lmToCanvas(lm[234]);
   const [,y454] = lmToCanvas(lm[454]);
   const faceW = Math.hypot(x454-x234, y454-y234);
-  const size = faceW * 0.13;
+  const size  = faceW * 0.13;
   for (const idx of [50, 280]) {
     const [cx, cy] = lmToCanvas(lm[idx]);
     ctx.save(); ctx.globalAlpha = 0.75;
@@ -419,50 +502,94 @@ function drawCheekStickers(lm) {
 }
 
 // ─────────────────────────────────────────
-// Hat
+// Hat — pitch-aware anchor + foreshortening
 // ─────────────────────────────────────────
+// Strategy:
+//   1. Anchor point: lm[10] offset along chin→forehead axis
+//   2. Roll angle: cheek-to-cheek (same as before, stable)
+//   3. Pitch: compare face height vs width → foreshorten hat height
+//             and shift hat further up along the face-up axis
 const BRIM_BOTTOM_FRAC = 855 / 900;
 const CROWN_TOP_FRAC   =  80 / 900;
 
 function drawHat(lm) {
-  const [x10,  y10 ] = lmToCanvas(lm[10]);
+  // Forehead & chin in canvas space
+  const [x10,  y10 ] = lmToCanvas(lm[10]);   // upper forehead
+  const [x152, y152] = lmToCanvas(lm[152]);  // chin
+
+  // Cheeks for roll angle (sorted L→R)
   const [x234, y234] = lmToCanvas(lm[234]);
   const [x454, y454] = lmToCanvas(lm[454]);
   const [xL, yL, xR, yR] = x234 <= x454 ? [x234,y234,x454,y454] : [x454,y454,x234,y234];
-  const angle = Math.atan2(yR-yL, xR-xL);
-  const faceW = Math.hypot(xR-xL, yR-yL);
-  const sx = smoothX.update(x10), sy = smoothY.update(y10);
-  const sw = smoothFW.update(faceW), sa = smoothAng.update(angle);
-  const hatW = sw * 1.25, hatH = hatW * (900/800);
+  const rollAngle = Math.atan2(yR-yL, xR-xL);
+  const faceW     = Math.hypot(xR-xL, yR-yL);
+
+  // Face-up unit vector (chin → forehead direction)
+  const faceUpX = x10 - x152;
+  const faceUpY = y10 - y152;
+  const faceUpLen = Math.hypot(faceUpX, faceUpY) || 1;
+  const uX = faceUpX / faceUpLen;
+  const uY = faceUpY / faceUpLen;
+
+  // Pitch estimation: faceH / faceW
+  // Straight ≈ 1.3–1.6  |  Looking up ≈ 0.6–1.0 (face foreshortens)
+  const faceH     = Math.abs(y152 - y10);
+  const pitchRaw  = faceH / (faceW || 1);
+  const pitchScale = Math.max(0.45, Math.min(1.0, pitchRaw * 0.70));
+
+  // Smooth all values
+  const sx    = smoothHatX.update(x10);
+  const sy    = smoothHatY.update(y10);
+  const sw    = smoothFW.update(faceW);
+  const sa    = smoothRoll.update(rollAngle);
+  const sp    = smoothPitch.update(pitchScale);
+
+  // Hat size — normal width, height foreshortened by pitch
+  const hatW  = sw * 1.25;
+  const hatH  = hatW * (900 / 800) * sp;
+
+  // Anchor: brim-bottom of the (foreshortened) hat
   const anchorY = hatH * BRIM_BOTTOM_FRAC;
+
+  // Push hat slightly further "up" along face axis when pitched back
+  // so it doesn't float off the forehead
+  const pitchOffset = (1.0 - sp) * hatH * 0.18;
+  const anchorX = sx - uX * pitchOffset;
+  const anchorY2 = sy - uY * pitchOffset;
+
   ctx.save();
-  ctx.translate(sx, sy); ctx.rotate(sa);
+  ctx.translate(anchorX, anchorY2);
+  ctx.rotate(sa);
   ctx.shadowColor = 'rgba(0,20,0,0.5)';
-  ctx.shadowBlur  = 16 * window.devicePixelRatio;
-  ctx.shadowOffsetY = 6 * window.devicePixelRatio;
+  ctx.shadowBlur  = 14 * window.devicePixelRatio;
+  ctx.shadowOffsetY = 5 * window.devicePixelRatio;
   ctx.drawImage(hatImg, -hatW/2, -anchorY, hatW, hatH);
   ctx.restore();
-  return { rcx: sx, rcy: sy - anchorY + hatH * CROWN_TOP_FRAC, faceW: sw };
+
+  return {
+    rcx:  anchorX,
+    rcy:  anchorY2 - anchorY + hatH * CROWN_TOP_FRAC,
+    faceW: sw,
+  };
 }
 
 // ─────────────────────────────────────────
-// Debug overlay (remove once confirmed)
+// Debug overlay
 // ─────────────────────────────────────────
 function drawDebug() {
   const warmup = baselineSamples.length < BASELINE_FRAMES;
   const status = warmup
     ? `calibrating… ${baselineSamples.length}/${BASELINE_FRAMES}`
     : isLookingUp ? '👆 LOOKING UP' : '😐 straight';
-  const rise   = chinBaseline !== null
-    ? (chinBaseline - smoothedChinY).toFixed(1) + 'px'
-    : '--';
-  const dpr    = window.devicePixelRatio;
+  const rise = chinBaseline !== null
+    ? (chinBaseline - smoothedChinY).toFixed(1) + 'px' : '--';
+  const dpr = window.devicePixelRatio;
   ctx.save();
-  ctx.font = `bold ${13 * dpr}px -apple-system, sans-serif`;
+  ctx.font = `bold ${13*dpr}px -apple-system,sans-serif`;
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(8, 8, 260 * dpr, 30 * dpr);
+  ctx.fillRect(8, 8, 260*dpr, 30*dpr);
   ctx.fillStyle = isLookingUp ? '#00ff88' : '#fff';
-  ctx.fillText(`chin rise: ${rise}  ${status}`, 14, 26 * dpr);
+  ctx.fillText(`chin rise: ${rise}  ${status}`, 14, 26*dpr);
   ctx.restore();
 }
 
@@ -476,7 +603,7 @@ function onResults(results) {
 
   // 1. Video
   ctx.save();
-  if (currentFacingMode === 'user') { ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
+  if (currentFacingMode === 'user') { ctx.translate(canvas.width,0); ctx.scale(-1,1); }
   ctx.drawImage(video, ox, oy, rW, rH);
   ctx.restore();
 
@@ -484,10 +611,10 @@ function onResults(results) {
   if (ambient.length === 0) initAmbient();
   stepAmbient();
 
-  // 3. Settled pile (behind pot rim)
-  drawSettled();
+  // 3. Cartoon gold pile (behind pot rim)
+  drawPile();
 
-  // 4. Pot
+  // 4. Pot (over pile base)
   drawPot();
 
   let hatAnchor = null;
@@ -540,8 +667,8 @@ async function start() {
 // ─────────────────────────────────────────
 flipBtn.addEventListener('click', () => {
   currentFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
-  smoothX.reset(); smoothY.reset(); smoothFW.reset(); smoothAng.reset();
-  // Reset look-up calibration on camera flip
+  smoothHatX.reset(); smoothHatY.reset(); smoothFW.reset();
+  smoothRoll.reset(); smoothPitch.reset();
   baselineSamples = []; chinBaseline = null; smoothedChinY = null;
   start();
 });
