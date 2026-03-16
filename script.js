@@ -110,7 +110,7 @@ function updateTrigger(lm) {
 function getPot() {
   return {
     cx:   canvas.width  * 0.5,
-    rimY: canvas.height * 0.805,
+    rimY: canvas.height * 0.81,
     rimRX:canvas.width  * 0.47,
     rimRY:canvas.width  * 0.47 * 0.085,
   };
