@@ -402,10 +402,10 @@ function drawHat(lm) {
   const sx=smoothHatX.update(x10), sy=smoothHatY.update(y10);
   const sw=smoothFW.update(faceW),  sa=smoothRoll.update(rollAngle);
   const sp=smoothPitch.update(pitchScale);
-  const hatW=sw*1.25, hatH=hatW*(900/800)*sp;
+  const hatW=sw*1.55, hatH=hatW*(900/800)*sp;
   const anchorY=hatH*BRIM_BOTTOM_FRAC, pOff=(1-sp)*hatH*.18;
   ctx.save();
-  ctx.translate(sx-uX*pOff,sy-uY*pOff); ctx.rotate(sa);
+  ctx.translate(sx-uX*pOff, sy-uY*pOff+hatH*0.12); ctx.rotate(sa);
   ctx.shadowColor='rgba(0,20,0,.5)'; ctx.shadowBlur=14*window.devicePixelRatio;
   ctx.shadowOffsetY=5*window.devicePixelRatio;
   ctx.drawImage(hatImg,-hatW/2,-anchorY,hatW,hatH); ctx.restore();
