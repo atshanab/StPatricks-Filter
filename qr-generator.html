@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>QR Code Generator</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    body { display:flex; flex-direction:column; align-items:center; justify-content:center;
+           min-height:100vh; margin:0; background:#f0f0f0; font-family:sans-serif; gap:20px; }
+    #qrcode canvas { border: 16px solid white; border-radius: 8px;
+                     box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+    button { padding:14px 32px; font-size:16px; font-weight:700; background:#1a5c1a;
+             color:white; border:none; border-radius:8px; cursor:pointer; }
+    button:hover { background:#2a8c2a; }
+    p { color:#444; font-size:14px; }
+  </style>
+</head>
+<body>
+  <h2 style="color:#1a5c1a">☘️ St. Patrick's Day Filter QR Code</h2>
+  <div id="qrcode"></div>
+  <p>atshanab.github.io/StPatricks-Filter/</p>
+  <button onclick="download()">⬇️ Download PNG</button>
+
+  <script>
+    new QRCode(document.getElementById("qrcode"), {
+      text: "https://atshanab.github.io/StPatricks-Filter/",
+      width: 300, height: 300,
+      colorDark: "#1a5c1a",
+      colorLight: "#ffffff",
+      correctLevel: QRCode.CorrectLevel.H
+    });
+
+    function download() {
+      const canvas = document.querySelector('#qrcode canvas');
+      const a = document.createElement('a');
+      a.download = 'stpatricks-filter-qr.png';
+      a.href = canvas.toDataURL('image/png');
+      a.click();
+    }
+  </script>
+</body>
+</html>
